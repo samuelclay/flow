@@ -1,4 +1,4 @@
-// REVISION: flow-v103-sound
+// REVISION: flow-v104-box
 //
 // Shared by the styles: a small PRNG and the cell grid every harness draws
 // from (packed for Claude Code's Raster, rendered as ANSI lines for pi).
@@ -28,12 +28,14 @@ export class Rng {
 
 /**
  * Whether a region gets a scene's tall layout (the spine's, a pane's) rather
- * than its band layout. By rows, not by shape: the band layouts are made for
- * the 5-row band, and a pane wider than it is tall (a desktop pane dragged
- * wide) is still far too tall for them.
+ * than its band layout. Mostly by rows, not by shape: the band layouts are
+ * made for the 5-row band, and a pane wider than it is tall (a desktop pane
+ * dragged wide) is still far too tall for them. A small box up to 12 rows
+ * (crabigator's column) goes by how it looks: a cell is about twice as tall
+ * as it is wide, so 36 × 9 is a wide strip, and the band layouts fit it.
  */
 export function isTall(columns: number, rows: number): boolean {
-  return rows > 8 || rows > columns
+  return rows > 12 || rows > columns || (rows > 8 && rows * 2 > columns)
 }
 
 /** The terminal's own color (Raster's bit-24 marker): transparent. */
