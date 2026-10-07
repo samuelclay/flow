@@ -1,4 +1,4 @@
-// REVISION: flow-v63-fade
+// REVISION: flow-v64-fade-turns
 //
 // How busy the agent is: the work → scene mapping for `/flow auto`. Events
 // add "heat" (the metaphor from when the only scene was a fire), the heat
@@ -8,11 +8,11 @@
 // which tint shows: smoke after a failure or a compaction, blue when the
 // context is nearly full. Pure: no `$`, so it is unit-tested directly.
 //
-// Fade (`/flow fade on`) reads the scene as freshness instead: each change of
-// state (a turn starting or ending, a question asked) relights it to full, and
-// it eases back to its base over two minutes. A bright scene has just changed;
-// embers have sat a while. Work still flares on top, but a long turn no
-// longer climbs.
+// Fade (`/flow fade on`) adds freshness: each change of state (a turn
+// starting or ending, a question asked) relights the scene to full, and it
+// eases back to its base over two minutes. While a turn runs the scene never
+// sits lower than plain auto would show it (a long turn still climbs); once
+// it ends, a bright scene has just changed and embers have sat a while.
 //
 // Calibrated so the range reads as work, not chatter (see the calibration
 // tests): a streamed answer sits mid-range, edits and commands flare above
@@ -194,12 +194,14 @@ export class Activity {
   /**
    * Fade's dial: the base (the effort floor while a turn runs, the idle floor
    * otherwise), lifted toward 10 by how recently the state changed, plus the
-   * work's own flares and the subagents. No turn-length climb.
+   * work's own flares and the subagents. While a turn runs, never below the
+   * plain auto dial: a long turn climbs; a stale wait sits low.
    */
   strengthFaded(idleFloor: number): number {
     const base = this.isTurnActive ? this.floor : this.isWorking ? 1 : idleFloor
     const lit = base + this.fade * (10 - base) + this.heat + this.agentBoost
-    return Math.max(this.isWorking ? 1 : 0, Math.min(10, Math.round(lit)))
+    const faded = Math.max(this.isWorking ? 1 : 0, Math.min(10, Math.round(lit)))
+    return this.isTurnActive ? Math.max(faded, this.strength(idleFloor)) : faded
   }
 
   /** How much company subagents add (a wider fire, more boats, wingmen): 15 per running subagent. */

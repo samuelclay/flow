@@ -1,4 +1,4 @@
-// REVISION: flow-v111-fade-random-color
+// REVISION: flow-v112-fade-turns
 
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
@@ -1537,17 +1537,16 @@ test('fade: a change of state relights the scene to full, and it eases back to i
   expect(a.strengthFaded(0)).toBe(0)
 })
 
-test('fade: a turn sits at its effort floor once faded; work still flares on top, but it no longer climbs with time', () => {
+test('fade: a long turn climbs as plain auto does, work flares it, and the turn ending relights it', () => {
   const a = new Activity()
   a.turnStarted()
   a.modelStep('high') // floor 4
   a.changed()
   run(a, FADE_MS + 1000)
-  expect(a.strengthFaded(1)).toBe(4)
-  run(a, 120_000) // the plain auto dial would have climbed four levels by now
-  expect(a.strength(1)).toBeGreaterThan(a.strengthFaded(1))
+  expect(a.strengthFaded(1)).toBe(a.strength(1)) // never below plain auto in a turn
+  expect(a.strengthFaded(1)).toBe(8) // 4, and a level for each 30 s
   a.edited(60)
-  expect(a.strengthFaded(1)).toBeGreaterThan(4)
+  expect(a.strengthFaded(1)).toBeGreaterThan(8)
   // The turn ending relights it.
   a.turnEnded()
   a.changed()

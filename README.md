@@ -110,7 +110,7 @@ With **`/flow fade on`** (or *Fade* in `/config`), the scene shows how recently 
 
 It then eases back down to its base over two minutes. A bright scene has just changed; embers have sat a while.
 
-The base is the turn's effort floor while the agent works, and the idle glow otherwise. Edits, commands and subagents still flare it on top, but a long turn no longer climbs. Fade is off by default.
+While a turn runs, the scene never sits lower than plain auto would show it, so a long turn still climbs and edits, commands and subagents still flare it. Once the turn ends, it fades from full down to the idle glow, so a session that has sat a while shows as embers. Fade is off by default.
 
 ## The command
 
