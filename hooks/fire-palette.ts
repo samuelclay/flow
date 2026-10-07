@@ -1,7 +1,7 @@
-// REVISION: flow-v61-names
+// REVISION: flow-v62-embers
 //
 // Truecolor heat palettes for ember: a black-body ramp (deep red
-// → orange → yellow → white-hot), a blue gas pilot for strength 1, a gray
+// → orange → yellow → white-hot), dark embers for strength 1, a gray
 // smoke ramp, and a blue-white core for a nearly-full context. Quantized to
 // 48 steps per palette so a frame stays well inside the Raster's 1024
 // distinct color pairs.
@@ -19,7 +19,14 @@ const BLACKBODY: Stop[] = [
   [0.78, [255, 204, 72]],
   [1, [255, 249, 218]],
 ]
-const PILOT: Stop[] = [
+/** A fire burned down: embers glowing deep red to dark orange, never yellow. */
+const EMBERS: Stop[] = [
+  [0, [40, 6, 2]],
+  [0.5, [112, 26, 6]],
+  [1, [190, 74, 14]],
+]
+/** A low fire (to 5) with the context nearly full: all of it burns blue. */
+const BLUE_EMBERS: Stop[] = [
   [0, [10, 18, 74]],
   [0.5, [34, 88, 226]],
   [1, [172, 216, 255]],
@@ -73,11 +80,12 @@ export function smokeColor(t: number): number {
 
 /**
  * Color for heat `t` (0..1) at `strength`: low strengths never reach the
- * white-hot end (a 4 tops out orange), strength 1 burns as a blue pilot.
+ * white-hot end (a 4 tops out orange), strength 1 is a bed of embers.
  */
 export function heatColor(strength: number, t: number, tint: Tint = 'normal'): number {
   if (tint === 'smoke' && t < SMOKE_TIPS) return lut(SMOKE)[Math.round((t / SMOKE_TIPS) * STEPS)]!
-  const stops = tint === 'blue' ? BLUE_CORE : strength === 1 ? PILOT : BLACKBODY
-  const reach = strength === 1 ? 1 : 0.52 + 0.048 * Math.min(10, strength)
+  const low = strength <= 5 && tint === 'blue'
+  const stops = low ? BLUE_EMBERS : tint === 'blue' ? BLUE_CORE : strength === 1 ? EMBERS : BLACKBODY
+  const reach = strength === 1 || low ? 1 : 0.52 + 0.048 * Math.min(10, strength)
   return lut(stops)[Math.round(Math.min(1, Math.max(0, t)) * reach * STEPS)]!
 }

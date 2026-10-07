@@ -1,4 +1,4 @@
-// REVISION: flow-v61-names
+// REVISION: flow-v62-embers
 //
 // A tiny Doom-fire–style cellular-automata fire, by Rob Macrae.
 //
@@ -6,7 +6,7 @@
 // that each live a random 1.5-8 s, then re-roll where they burn and how
 // bright, fading in and out at their own pace, and propagates upward
 // each `step()` with random cooling + sideways "wind" drift. Strength is a
-// 0..=10 dial: 0 = off, 1 = blue pilot lights, 8 = the default look, 10 = an
+// 0..=10 dial: 0 = off, 1 = glowing embers, 8 = the default look, 10 = an
 // inferno. It only simulates: `cells` holds the heat, which the fire scene
 // (Ember, styles.ts) draws with `glyphFor` and `colorFor`.
 //
@@ -56,7 +56,8 @@ function xterm(idx: number): number {
   return 0xffffff
 }
 
-const BLUE_PILOT = [19, 27, 33]
+/** Level 1: a fire burned down to its embers, deep red to dark orange (a palette turns them with the rest). */
+const EMBERS = [52, 88, 130]
 const ORANGE = [130, 166, 172, 208, 214, 220]
 const MIX5 = [124, 160, 166, 208, 214, 220]
 const RED67 = [88, 124, 160, 196, 202, 208]
@@ -64,24 +65,24 @@ const RED8 = [52, 88, 124, 160, 196, 202, 208, 214]
 const RED9 = [88, 124, 160, 196, 202, 208, 214, 220]
 const RED10 = [124, 160, 196, 202, 208, 214, 220, 226]
 const SMOKE = [236, 238, 240, 242, 244, 246, 248, 250]
-/** Context nearly full: the hottest core burns blue-white. */
+/** Context nearly full: the hottest core burns blue-white, and a low fire's embers burn blue. */
 const BLUE_CORE = [33, 39, 45, 51, 87, 159]
+const BLUE_EMBERS = [17, 19, 26, 27, 33, 39]
 
 function pick(ramp: number[], r: number): number {
   const n = ramp.length
   return ramp[Math.min(n - 1, Math.floor(Math.min(1, Math.max(0, r)) * n))]!
 }
 
-/** Color by (strength, heat ratio): blue pilots → orange → red inferno. */
+/** Color by (strength, heat ratio): embers → orange → red inferno. */
 export function colorFor(strength: number, r: number, tint: Tint = 'normal'): number {
   let idx: number
   if (tint === 'smoke' && r < SMOKE_TIPS) idx = pick(SMOKE, r / SMOKE_TIPS)
+  else if (tint === 'blue' && strength <= 5) idx = pick(BLUE_EMBERS, r)
   else if (tint === 'blue' && r >= 0.6) idx = pick(BLUE_CORE, (r - 0.6) / 0.4)
-  else if (strength === 1) idx = pick(BLUE_PILOT, r)
-  else if (strength <= 4) {
-    const warmth = strength === 2 ? 0.75 : strength === 3 ? 0.92 : 1
-    idx = r < warmth ? pick(ORANGE, r) : pick(BLUE_PILOT, r)
-  } else if (strength === 5) idx = pick(MIX5, r)
+  else if (strength === 1) idx = pick(EMBERS, r)
+  else if (strength <= 4) idx = pick(ORANGE, r)
+  else if (strength === 5) idx = pick(MIX5, r)
   else if (strength <= 7) idx = pick(RED67, r)
   else if (strength === 8) idx = pick(RED8, r)
   else if (strength === 9) idx = pick(RED9, r)
