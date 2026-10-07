@@ -1,4 +1,4 @@
-// REVISION: flow-v105-held
+// REVISION: flow-v106-hue
 //
 // Engine (the `engine` style): a Victorian steam engine room on the same dials
 // as the fire; the level is how hard it is being driven. At 1 it stands cold,
@@ -1635,5 +1635,6 @@ export const engineScene = defineScene({
   name: 'engine',
   aliases: ['mechanism'],
   blurb: 'a steampunk engine that runs up to full speed',
+  hue: { key: 71, range: 180 },
   make: seed => new Engine(seed),
 })

@@ -1,4 +1,4 @@
-// REVISION: flow-v109-held
+// REVISION: flow-v110-hue
 //
 // Two launch sites in the sky world (sky.ts): a Falcon 9 and a Starship, each
 // beside a lattice launch tower (Starship's with two catch arms). The level is the
@@ -2228,6 +2228,7 @@ export const falconScene = defineScene({
   aliases: ['rocket'],
   blurb: 'a Falcon 9 carrying Dragon: its booster lands on its legs, Dragon comes home under parachutes to a splashdown',
   night: true,
+  hue: { key: 251, range: 45, spread: 60 },
   make: seed => new Falcon(seed),
 })
 
@@ -2236,5 +2237,6 @@ export const starshipScene = defineScene({
   aliases: ['spaceship'],
   blurb: "a bigger rocket that hot-stages: its booster is caught by the tower's arms, the Ship splashes down",
   night: true,
+  hue: { key: 251, range: 45, spread: 60 },
   make: seed => new Starship(seed),
 })

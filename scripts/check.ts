@@ -1,15 +1,17 @@
-// REVISION: flow-v81-scene-tools
+// REVISION: flow-v82-box-hue
 //
 // What every scene must hold to (AGENTS.md), measured: plugin.json lists
 // the scenes in SCENES, level 0 draws nothing, a frame has at most 1024
-// colour pairs, and step() + grid() takes under ~2 ms at the band's and the
-// spine's sizes. Exits 1 on any failure. Not part of the mod (Node).
+// colour pairs (in every palette too), and step() + grid() takes under ~2 ms
+// at the band's and the spine's sizes. crabigator's column sizes are checked
+// the same way. Exits 1 on any failure. Not part of the mod (Node).
 //
 //   npm run check              every scene
 //   npm run check -- surf ski  just these
 
 import { syncManifest } from './sync-manifest'
-import { build, nightsOf, pairs, scenesFrom, TINTS } from './scene-lab'
+import { BOXES, build, nightsOf, pairs, scenesFrom, TINTS, turned } from './scene-lab'
+import { HUES } from '../hooks/palette'
 
 const MAX_PAIRS = 1024
 const MAX_MS = 2
@@ -18,7 +20,10 @@ const SIZES = [
   [80, 5],
   [13, 30],
   [22, 60],
+  ...BOXES.map(b => [b.columns, b.rows] as const),
 ] as const
+/** Palettes checked for colour pairs as well as the scene's own colours. */
+const CHECK_HUES = [undefined, HUES.violet, HUES.jade]
 const TIMED = [
   [250, 5],
   [22, 60],
@@ -43,10 +48,12 @@ for (const scene of scenesFrom(process.argv.slice(2))) {
           const f = build(scene, columns, rows, { level, night, tint }, 60)
           for (let i = 0; i < 20; i++) {
             f.step()
-            const n = pairs(f.grid())
-            if (n > most) {
-              most = n
-              where = `${columns}×${rows} level ${level}${night ? ' night' : ''} ${tint}`
+            for (const hue of CHECK_HUES) {
+              const n = pairs(turned(scene, f.grid(), hue))
+              if (n > most) {
+                most = n
+                where = `${columns}×${rows} level ${level}${night ? ' night' : ''} ${tint}${hue === undefined ? '' : ` hue ${hue}`}`
+              }
             }
           }
         }

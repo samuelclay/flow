@@ -1,4 +1,4 @@
-// REVISION: flow-v62-turn-time
+// REVISION: flow-v63-fade
 //
 // How busy the agent is: the work → scene mapping for `/flow auto`. Events
 // add "heat" (the metaphor from when the only scene was a fire), the heat
@@ -7,6 +7,12 @@
 // keeps going climbs a level every 30 s besides. It also says
 // which tint shows: smoke after a failure or a compaction, blue when the
 // context is nearly full. Pure: no `$`, so it is unit-tested directly.
+//
+// Fade (`/flow fade on`) reads the scene as freshness instead: each change of
+// state (a turn starting or ending, a question asked) relights it to full, and
+// it eases back to its base over two minutes. A bright scene has just changed;
+// embers have sat a while. Work still flares on top, but a long turn no
+// longer climbs.
 //
 // Calibrated so the range reads as work, not chatter (see the calibration
 // tests): a streamed answer sits mid-range, edits and commands flare above
@@ -30,6 +36,8 @@ const TURN_STEP_MS = 30_000
 /** Frames of gray tips after a failed command / a compaction. */
 const FAIL_SMOKE = 30
 const COMPACT_SMOKE = 40
+/** Fade: how long a change of state takes to ease back to the base. */
+export const FADE_MS = 120_000
 
 export function effortFloor(effort: Effort): number {
   switch (effort) {
@@ -58,6 +66,8 @@ export class Activity {
   contextPercent = 0
   /** Frames this turn has been running (none between turns). */
   turnFrames = 0
+  /** Time since the state last changed, for fade (long past: nothing to relight). */
+  sinceChangeMs = FADE_MS
   /** Streamed characters since the last tick, weighted. */
   private pendingChars = 0
 
@@ -73,6 +83,11 @@ export class Activity {
   turnEnded(): void {
     this.isTurnActive = false
     this.turnFrames = 0
+  }
+
+  /** The state changed (a turn started or ended, a question was asked): fade relights from full. */
+  changed(): void {
+    this.sinceChangeMs = 0
   }
 
   /** One model request. Only the main loop's sets the effort floor. */
@@ -125,6 +140,20 @@ export class Activity {
     return this.heat >= 0.5
   }
 
+  /**
+   * Fade's light, from 1 at a change of state to 0 two minutes on: a cosine
+   * ease, so it holds near full for the first stretch and settles gently.
+   */
+  get fade(): number {
+    if (this.sinceChangeMs >= FADE_MS) return 0
+    return 0.5 * (1 + Math.cos((Math.PI * this.sinceChangeMs) / FADE_MS))
+  }
+
+  /** Whether fade still lights a dark scene at least a level (strength rounds 0.5 up). */
+  get isFading(): boolean {
+    return this.fade >= 0.05
+  }
+
   /** Levels from running subagents: diminishing, so a swarm doesn't pin 10. */
   get agentBoost(): number {
     return this.runningAgents > 0 ? 1.2 * Math.log2(1 + this.runningAgents) : 0
@@ -138,6 +167,7 @@ export class Activity {
   /** Advance `frames` frames (a slow tick covers several) of cooling. */
   tick(frames = 1): void {
     if (this.isTurnActive) this.turnFrames += frames
+    this.sinceChangeMs = Math.min(FADE_MS, this.sinceChangeMs + frames * FRAME_MS)
     if (this.pendingChars > 0) {
       this.add(Math.min(STREAM_CAP * frames, this.pendingChars * STREAM_PER_CHAR))
       this.pendingChars = 0
@@ -159,6 +189,17 @@ export class Activity {
     if (!this.isWorking) return Math.max(0, Math.min(10, Math.round(idleFloor + this.heat)))
     const base = this.isTurnActive ? this.floor : 1
     return Math.max(1, Math.min(10, Math.round(base + this.heat + this.agentBoost) + this.turnBoost))
+  }
+
+  /**
+   * Fade's dial: the base (the effort floor while a turn runs, the idle floor
+   * otherwise), lifted toward 10 by how recently the state changed, plus the
+   * work's own flares and the subagents. No turn-length climb.
+   */
+  strengthFaded(idleFloor: number): number {
+    const base = this.isTurnActive ? this.floor : this.isWorking ? 1 : idleFloor
+    const lit = base + this.fade * (10 - base) + this.heat + this.agentBoost
+    return Math.max(this.isWorking ? 1 : 0, Math.min(10, Math.round(lit)))
   }
 
   /** How much company subagents add (a wider fire, more boats, wingmen): 15 per running subagent. */

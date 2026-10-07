@@ -1,17 +1,19 @@
-// REVISION: flow-v110-long-beds
+// REVISION: flow-v111-fade-random-color
 
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
 import { AsciiFire, colorFor, params } from '../hooks/fire'
-import { effortFloor, Activity, linesWritten } from '../hooks/activity'
+import { effortFloor, Activity, FADE_MS, linesWritten } from '../hooks/activity'
+import { chromaHue, fromOklch, hueName, hueOf, NATURAL, oklab, Palette, paletteToward, HUES } from '../hooks/palette'
+import { draw, drawSession, readBag, readPick } from '../hooks/pick'
 import { nextTip, readTips, changedText, changesFor, helpText, isNightAt, parseFlowArgs, readConfig, statusText } from '../hooks/settings'
 import { gridToAnsi } from '../pi/ansi'
 import { effortOf, piLinesWritten } from '../pi/mapping'
 import { Balloon, skyColor } from '../hooks/balloon'
 import { Falcon } from '../hooks/rocket'
 import { Colony } from '../hooks/colony'
-import { makeScene, nextStyle, SCENES, STYLES, styleNamed } from '../hooks/styles'
+import { makeScene, nextStyle, SCENES, sceneHue, STYLES, styleNamed } from '../hooks/styles'
 import { keepOverrides, writeThrough } from '../hooks/register'
 import { coverage, frameSvg, gridPixels, SVG_LIMIT } from '../hooks/svg'
 import { Cells, isTall } from '../hooks/cells'
@@ -726,7 +728,17 @@ test('sound off (the default): nothing plays', async ($, on) => {
 })
 
 test('config values are validated, falling back to defaults', async () => {
-  expect(readConfig(undefined)).toEqual({ mode: 'auto', style: 'fire', idle: 1, level: 8, layout: 'band', time: 'clock', sound: 'off' })
+  expect(readConfig(undefined)).toEqual({
+    mode: 'auto',
+    style: 'fire',
+    idle: 1,
+    level: 8,
+    layout: 'band',
+    time: 'clock',
+    sound: 'off',
+    fade: 'off',
+    color: 'natural',
+  })
   expect(readConfig({ mode: 'manual', style: 'ember', idle: 'dark', level: 3 })).toEqual({
     mode: 'manual',
     style: 'fire',
@@ -735,6 +747,8 @@ test('config values are validated, falling back to defaults', async () => {
     layout: 'band',
     time: 'clock',
     sound: 'off',
+    fade: 'off',
+    color: 'natural',
   })
   expect(readConfig({ idle: 'pilot' }).idle).toBe(1) // the old name for glow
   expect(readConfig({ idle: 'glow' })).toEqual({
@@ -745,9 +759,14 @@ test('config values are validated, falling back to defaults', async () => {
     layout: 'band',
     time: 'clock',
     sound: 'off',
+    fade: 'off',
+    color: 'natural',
   })
   expect(readConfig({ mode: 'loud', style: 'hearth', idle: 'x', level: 5.5 })).toEqual(readConfig(undefined))
   expect(readConfig({ level: 42 }).level).toBe(8)
+  expect(readConfig({ style: 'random', fade: 'on', color: 'violet' })).toMatchObject({ style: 'random', fade: 'on', color: 'violet' })
+  expect(readConfig({ fade: 'yes', color: 'chartreuse' })).toMatchObject({ fade: 'off', color: 'natural' })
+  expect(readConfig({ color: 'random' }).color).toBe('random')
 })
 
 test('settings arrive from /config', { options: { mode: 'manual', style: 'surf', level: 3 } }, async ($, on) => {
@@ -1487,4 +1506,201 @@ test('avalon: each strike is sent ahead of its flash by the player start-up time
   const want = PLAYER_LEAD_MS / 70
   for (const l of leads) expect(l >= 0 && l <= Math.ceil(want) + 1).toBe(true)
   expect(leads.filter(l => Math.abs(l - want) <= 1.5).length).toBeGreaterThan(leads.length * 0.8)
+})
+
+// ── Fade ─────────────────────────────────────────────────────────────────
+
+/** Run `a` for `ms` of 70 ms frames. */
+function run(a: Activity, ms: number) {
+  for (let t = 0; t < ms; t += 70) a.tick()
+}
+
+test('fade: a change of state relights the scene to full, and it eases back to its base over two minutes', () => {
+  const a = new Activity()
+  expect(a.strengthFaded(1)).toBe(1) // nothing changed lately: embers
+  a.changed()
+  expect(a.strengthFaded(1)).toBe(10)
+  run(a, 20_000)
+  expect(a.strengthFaded(1)).toBeGreaterThanOrEqual(8) // still bright a while after
+  run(a, 40_000)
+  const mid = a.strengthFaded(1)
+  expect(mid).toBeLessThan(8)
+  expect(mid).toBeGreaterThan(2)
+  run(a, FADE_MS - 60_000)
+  expect(a.strengthFaded(1)).toBe(1) // back at its base by two minutes
+  expect(a.isFading).toBe(false)
+  // Idle dark: it shows while it fades, then gives the rows back.
+  a.changed()
+  expect(a.isFading).toBe(true)
+  expect(a.strengthFaded(0)).toBe(10)
+  run(a, FADE_MS)
+  expect(a.strengthFaded(0)).toBe(0)
+})
+
+test('fade: a turn sits at its effort floor once faded; work still flares on top, but it no longer climbs with time', () => {
+  const a = new Activity()
+  a.turnStarted()
+  a.modelStep('high') // floor 4
+  a.changed()
+  run(a, FADE_MS + 1000)
+  expect(a.strengthFaded(1)).toBe(4)
+  run(a, 120_000) // the plain auto dial would have climbed four levels by now
+  expect(a.strength(1)).toBeGreaterThan(a.strengthFaded(1))
+  a.edited(60)
+  expect(a.strengthFaded(1)).toBeGreaterThan(4)
+  // The turn ending relights it.
+  a.turnEnded()
+  a.changed()
+  expect(a.strengthFaded(1)).toBe(10)
+})
+
+test('fade off (the default): the dial is the plain auto one', async ($, on) => {
+  const cfg = readConfig(undefined)
+  const a = new Activity()
+  const d = new SceneDriver(cfg, a)
+  a.changed()
+  expect(d.level()).toBe(a.strength(1))
+  d.apply({ fade: 'on' })
+  expect(d.level()).toBe(10)
+})
+
+// ── Palettes ─────────────────────────────────────────────────────────────
+
+test('palette: OKLab round-trips, and a turn of the wheel keeps lightness and lands on the hue', () => {
+  for (const c of [0xff6a00, 0x3355ff, 0x22aa55, 0x9b30ff, 0xd04020]) {
+    const [L, a, b] = oklab(c)
+    const back = fromOklch(L, Math.hypot(a, b), (Math.atan2(b, a) * 180) / Math.PI)
+    for (const shift of [0, 8, 16]) expect(Math.abs(((back >> shift) & 255) - ((c >> shift) & 255))).toBeLessThanOrEqual(1)
+  }
+  const p = new Palette(120, 'test')
+  const c = 0xd04020
+  const turned = p.color(c)
+  expect(Math.abs(oklab(turned)[0] - oklab(c)[0])).toBeLessThan(0.02)
+  const dh = ((chromaHue(turned).hue - chromaHue(c).hue + 540) % 360) - 180
+  expect(Math.abs(dh - 120)).toBeLessThan(8) // pulled into gamut, near the hue asked for
+})
+
+test('palette: the terminal colour and greys stay; the frame is turned into a copy, pairs never grow', () => {
+  const p = new Palette(200, 'test')
+  expect(p.color(DEFAULT)).toBe(DEFAULT)
+  for (const grey of [0x000000, 0x808080, 0xffffff, 0x8a8a8a]) expect(p.color(grey)).toBe(grey)
+  expect(NATURAL.color(0xff6a00)).toBe(0xff6a00)
+  const f = makeScene('fire', 3)
+  f.strength = 9
+  f.ensure(60, 5)
+  for (let i = 0; i < 40; i++) f.step()
+  const src = f.grid()
+  const before = Uint32Array.from(src.words)
+  const out = p.apply(src, new Cells(60, 5))
+  expect(src.words).toEqual(before) // untouched
+  const pairs = (w: Uint32Array) => {
+    const set = new Set<string>()
+    for (let i = 0; i < w.length; i += 3) set.add(`${w[i + 1]}:${w[i + 2]}`)
+    return set.size
+  }
+  expect(pairs(out.words)).toBeLessThanOrEqual(pairs(src.words))
+  for (let i = 0; i < src.words.length; i += 3) expect(out.words[i]).toBe(src.words[i]!) // glyphs as they were
+})
+
+test('palette: a scene turns toward a hue only as far as it allows; none asked, natural', () => {
+  expect(paletteToward(sceneHue('fire'), undefined)).toBe(NATURAL)
+  const violet = paletteToward(sceneHue('fire'), HUES.violet)
+  expect(violet.name).toBe('violet')
+  const sky = paletteToward(sceneHue('surf'), HUES.ember) // a long way round for a sea
+  expect(Math.abs(sky.shift)).toBeLessThanOrEqual(sceneHue('surf').range)
+  expect(paletteToward(sceneHue('fire'), sceneHue('fire').key).isNatural).toBe(true)
+  expect(hueName(HUES.azure + 4)).toBe('azure')
+  for (const d of SCENES) expect(d.hue.range).toBeGreaterThan(0)
+})
+
+test('palette: the hue of the most colourful colour; greys have none', () => {
+  // crabigator's session-mark colours: bg, fg.
+  expect(hueName(hueOf([0x3b1266, 0xf0d878])!)).toBe('violet')
+  expect(hueOf([0x1a1a1a, 0x202020])).toBeUndefined()
+  expect(hueOf([])).toBeUndefined()
+})
+
+test('the driver draws turned frames, but never while the context-full tint shows', () => {
+  const cfg = readConfig({ mode: 'manual', level: 8, color: 'azure' })
+  const d = new SceneDriver(cfg, new Activity())
+  const f = d.dial()
+  f.ensure(60, 5)
+  for (let i = 0; i < 30; i++) f.step()
+  expect(d.cells()).not.toBe(f.grid())
+  expect(d.shown()).toEqual({ scene: 'fire', palette: 'azure' })
+  f.tint = 'blue'
+  expect(d.cells()).toBe(f.grid())
+  d.apply({ color: 'natural' })
+  f.tint = 'normal'
+  expect(d.cells()).toBe(f.grid())
+  expect(d.frame()).toBe(f.frame())
+})
+
+// ── Random scenes and colours ────────────────────────────────────────────
+
+test('shuffle bag: every scene once a round, and a new round never starts with the last drawn', () => {
+  let bag = readBag(undefined, STYLES)
+  for (let round = 0; round < 4; round++) {
+    const seen: string[] = []
+    for (let i = 0; i < STYLES.length; i++) {
+      const before = bag.last
+      const r = draw(bag, STYLES, ((i * 7 + round * 3) % 10) / 10)
+      if (i === 0) expect(r.pick).not.toBe(before)
+      seen.push(r.pick)
+      bag = r.bag
+    }
+    expect(new Set(seen).size).toBe(STYLES.length)
+  }
+  expect(readBag({ left: ['fire', 'nope', 'fire'], last: 42 }, STYLES)).toEqual({ left: ['fire'] })
+})
+
+test('a session draws a scene and a hue; a kept pick reads back, a bad one does not', () => {
+  const d = drawSession(undefined, undefined, 0.5, 0.25)
+  expect(STYLES).toContain(d.pick.scene)
+  expect(Object.values(HUES)).toContain(d.pick.hue)
+  expect(readPick(d.pick)).toEqual(d.pick)
+  expect(readPick({ scene: 'hearth', hue: 3 })).toBeUndefined()
+  expect(readPick({ scene: 'fire' })).toBeUndefined()
+})
+
+test('/flow random, color and fade parse and apply; next from random moves on from the scene showing', () => {
+  const cfg = readConfig({ style: 'random' })
+  const shown = { scene: 'surf' as const, palette: 'natural' }
+  expect(parseFlowArgs('random')).toEqual({ kind: 'style', name: 'random' })
+  expect(changesFor(parseFlowArgs('next'), cfg, shown)).toEqual({ style: 'ski' })
+  expect(changesFor(parseFlowArgs('random night'), readConfig({}))).toEqual({ style: 'random', time: 'night' })
+  expect(changesFor(parseFlowArgs('fade'), cfg)).toEqual({ fade: 'on' })
+  expect(changesFor(parseFlowArgs('fade off'), cfg)).toEqual({ fade: 'off' })
+  expect(changesFor(parseFlowArgs('color violet'), cfg)).toEqual({ color: 'violet' })
+  expect(changesFor(parseFlowArgs('colour random'), cfg)).toEqual({ color: 'random' })
+  expect(changesFor(parseFlowArgs('color'), readConfig({ color: 'violet' }))).toEqual({ color: 'magenta' })
+  expect(parseFlowArgs('color chartreuse').kind).toBe('error')
+  expect(parseFlowArgs('fade maybe').kind).toBe('error')
+  expect(statusText(cfg, 4, 'normal', { hour: 12, minute: 0 }, { scene: 'surf', palette: 'teal' })).toContain('random: teal surf')
+  expect(statusText(readConfig({ fade: 'on' }), 4, 'normal', { hour: 12, minute: 0 })).toContain('auto, fading, now 4/10')
+  expect(helpText()).toContain('/flow fade')
+  expect(helpText()).toContain('/flow color')
+})
+
+test('random: each session opening draws another scene, and a reload keeps its own', { options: { style: 'random', mode: 'manual', level: 6 } }, async ($, on) => {
+  mock.clock(on)
+  mock.store(on)
+  engine(on)
+  await start($)
+  const first = (await flow($)).split('\n')[0]!
+  expect(first).toMatch(/^random: \w+, holding 6\/10/)
+  await start($) // a reload: the same session, the same scene
+  expect((await flow($)).split('\n')[0]).toBe(first)
+})
+
+test('inside crabigator (CRABIGATOR_FLOW set), the band stays dark: crabigator draws the scene itself', async ($, on) => {
+  mock.clock(on)
+  mock.store(on)
+  mock.env(on, { CRABIGATOR_FLOW: '1' })
+  engine(on)
+  await start($)
+  const ui = await $.ui.mount({ plugin: 'flow', surface: 'terminal', ...BAND })
+  expect(await ui.find({ type: 'Raster' })).toBeUndefined()
+  expect(await flow($)).toContain('crabigator draws the scene')
+  await ui.unmount()
 })

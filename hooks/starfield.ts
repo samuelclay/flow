@@ -1,4 +1,4 @@
-// REVISION: flow-v82-aliases
+// REVISION: flow-v83-hue
 //
 // Warp (the `warp` style): a starfield on the same dials as the fire, the
 // level is the ship's speed.
@@ -177,5 +177,6 @@ export const warpScene = defineScene({
   name: 'warp',
   blurb: 'stars that speed up to hyperspace',
   aliases: ['starfield', 'stars'],
+  hue: { key: 264, range: 180 },
   make: seed => new Starfield(seed),
 })

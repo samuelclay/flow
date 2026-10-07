@@ -1,4 +1,4 @@
-// REVISION: flow-v119-sound-gen
+// REVISION: flow-v120-fade-random-color
 //
 // Flow for Claude Code, by Rob Macrae: ambient scenes (a fire, the surf, a ski run,
 // rockets, a hot-air balloon and more) drawn as one terminal `Raster` in the
@@ -20,6 +20,15 @@
 // the store (applied at once, no reload) and writes them through to /config
 // when the session ends. A change made in /config wins. `/flow help` lists
 // the command's forms (see settings.ts).
+//
+// `/flow random` and `/flow color random` leave the scene and its hue to
+// chance: each session draws its own as it opens (pick.ts: shuffle bags in
+// the store, so sessions opened one after another differ), kept in session
+// state through reloads. Fade (`/flow fade on`) relights the scene at each
+// change of state (a turn starting or ending, a permission asked and
+// answered) and lets it ease down over two minutes. Inside crabigator
+// (CRABIGATOR_FLOW set) crabigator draws Flow in its own column, so this
+// one stays dark.
 
 import { atom, update } from 'claude-code'
 import type { CommandRunInput, CommandRunResult, EngineInterface, Register } from 'claude-code'
@@ -29,11 +38,13 @@ import { Activity, linesWritten } from './activity'
 import { FRAME_MS, SceneDriver } from './scene'
 import { changedText, changesFor, helpText, parseFlowArgs, readConfig, statusText, storedValue, type FlowConfig, nextTip, readTips } from './settings'
 import { styleNamed } from './styles'
+import { drawSession, readPick, type SessionPick } from './pick'
 import { frameSvg } from './svg'
 import { type BedTake, bedStep, burst, gather, MAX_PLAYS, unit, eventPlay, master, type SoundEvent } from './sound'
+import type { ScenePick } from '../types'
 
 
-const FLOW_REVISION = 'flow-v110-no-rhythms'
+const FLOW_REVISION = 'flow-v120-fade-random-color'
 const PLUGIN = 'flow'
 const KEY = 'flow'
 /** The command. */
@@ -85,6 +96,44 @@ async function keepAltitude($: EngineInterface, altitude: number): Promise<void>
 async function savedAltitude($: EngineInterface): Promise<number> {
   const { value } = await $.state.get({ plugin: 'flow', key: 'altitude' } as const)
   return typeof value === 'number' ? value : 0
+}
+
+/** The scene and hue this session drew (for `random`), kept in session state: a reload carries on with them. */
+const pickAtom = atom({ plugin: 'flow', key: 'pick' } as const, null as ScenePick | null)
+/** The shuffle bags sessions draw from, in the store: shared, so each opening draws another. */
+const SCENE_BAG = 'sceneBag'
+const HUE_BAG = 'hueBag'
+
+/**
+ * This session's scene and hue for `random`: the ones it drew before a reload,
+ * or a fresh draw from the shared bags (seeded by the clock). Never fails: a
+ * store that can't be read or written still gives a draw.
+ */
+async function sessionPick($: EngineInterface, now: number): Promise<SessionPick> {
+  try {
+    const { value } = await $.state.get({ plugin: 'flow', key: 'pick' } as const)
+    const kept = readPick(value)
+    if (kept) return kept
+  } catch {
+    // Nothing kept: draw.
+  }
+  let scenes: unknown
+  let hues: unknown
+  try {
+    scenes = await $.store.get(SCENE_BAG)
+    hues = await $.store.get(HUE_BAG)
+  } catch {
+    // Fresh bags.
+  }
+  const drawn = drawSession(scenes, hues, unit(now), unit(now ^ 0x5bd1e995))
+  try {
+    await $.store.set(SCENE_BAG, drawn.scenes)
+    await $.store.set(HUE_BAG, drawn.hues)
+    await update($, pickAtom, () => drawn.pick)
+  } catch {
+    // Not kept: the next reload draws again.
+  }
+  return drawn.pick
 }
 
 /**
@@ -217,10 +266,13 @@ async function sceneReply($: EngineInterface, e: CommandRunInput, ctx: SceneCtx)
   const { driver } = ctx
   const cfg = driver.cfg
   const cmd = parseFlowArgs(e.args)
-  if (cmd.kind === 'show') return { text: statusText(cfg, driver.level(), driver.tint(), driver.clock) }
+  if (cmd.kind === 'show') {
+    const text = statusText(cfg, driver.level(), driver.tint(), driver.clock, driver.shown())
+    return { text: driver.external ? `${text}\ncrabigator draws the scene in its own column, so it stays out of the band here` : text }
+  }
   if (cmd.kind === 'help') return { text: helpText() }
   if (cmd.kind === 'error') return { text: cmd.text }
-  const changes = changesFor(cmd, cfg) ?? {}
+  const changes = changesFor(cmd, cfg, driver.shown()) ?? {}
   $.ui.invalidate('ui.render')
   ctx.applyLocal(changes) // the scene carries on: 6 → 8 eases up from 6
   let note = (await keepOverrides($, changes)) ? '' : '  (not saved)'
@@ -239,7 +291,7 @@ async function sceneReply($: EngineInterface, e: CommandRunInput, ctx: SceneCtx)
       await $.ui.close({ id: SPINE })
     }
   }
-  return { text: `${changedText(cmd, cfg, "Claude's", driver.clock)}${note}` }
+  return { text: `${changedText(cmd, cfg, "Claude's", driver.clock, driver.shown())}${note}` }
 }
 
 export const register: Register = (on, options) => {
@@ -261,6 +313,8 @@ export const register: Register = (on, options) => {
   let ticks = 0
   /** A subagent's step or tool call arrived: count the running ones at the next poll. */
   let subagentSeen = false
+  /** Calls put to the person (`tool.check` said ask): when one finishes, the answer was a change of state too. */
+  const asked = new Set<string>()
   /**
    * The soundscape: the clips playing (each stoppable), its own clock (ms),
    * each bed layer's take (`bedStep` keeps them) and their players by id,
@@ -289,7 +343,7 @@ export const register: Register = (on, options) => {
    * Whether what was scheduled in generation `gen` may still play: the soundscape hasn't stopped since, and
    * no change waits for the next frame to stop it (another scene picked, the sound turned off).
    */
-  const current = (gen: number) => sound.gen === gen && cfg.sound === 'on' && cfg.style === sound.scene
+  const current = (gen: number) => sound.gen === gen && cfg.sound === 'on' && driver.sceneName === sound.scene
   const stopSound = () => {
     // (A new generation: a delayed event or retry from the soundscape stopped here never plays.)
     sound.gen++
@@ -323,8 +377,8 @@ export const register: Register = (on, options) => {
     const scene = desktopDriver.dial()
     scene.ensure(columns, rows)
     return {
-      source: frameSvg(scene.grid()),
-      alt: `flow: ${cfg.style}`,
+      source: frameSvg(desktopDriver.cells()),
+      alt: `flow: ${desktopDriver.sceneName}`,
       width: columns * DESKTOP_CELL_W,
       height: rows * DESKTOP_CELL_H,
     }
@@ -351,7 +405,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: COMMAND,
       description: 'An ambient scene that moves with the work: fire, surf, ski, rockets and more',
-      argumentHint: '[<scene> | next | day | night | clock | auto | 1-10 | off | band | spine | help]',
+      argumentHint: '[<scene> | next | random | color | fade | day | night | clock | auto | 1-10 | off | band | spine | help]',
     })
 
     // One-time move of settings kept in $.store before they were userConfig.
@@ -375,6 +429,21 @@ export const register: Register = (on, options) => {
     if (Object.keys(pending).length) {
       applyLocal(pending)
       $.ui.invalidate('ui.render')
+    }
+
+    // The scene and hue left to chance (`random`): this session's own, drawn as it
+    // opened. Both drivers show the same.
+    const picked = await sessionPick($, now)
+    for (const d of [driver, desktopDriver]) {
+      d.pick = picked.scene
+      d.pickHue = picked.hue
+    }
+
+    // Inside crabigator, crabigator draws Flow in its own column: this one stays dark.
+    try {
+      if (await $.env.get('CRABIGATOR_FLOW')) driver.external = desktopDriver.external = true
+    } catch {
+      // Not readable: draw as usual.
     }
 
     // Resume the balloon where the last load left it.
@@ -448,7 +517,7 @@ export const register: Register = (on, options) => {
         const playWav = (wav: string | undefined, gain = 1) => wav && play({ base64: wav, mime: 'audio/wav' }, gain)
         // Events with a clip of their own play now; the rest gather into a burst.
         for (const e of events) {
-          const p = eventPlay(e, sound.seed++, cfg.style, shownScene.strength)
+          const p = eventPlay(e, sound.seed++, driver.sceneName, shownScene.strength)
           if (!p) {
             // (Somewhere since the last frame, at random: a frame's pops all at once would buzz at the frame rate.)
             const at = sound.clock - Math.min(elapsed, 150) * unit(sound.seed++)
@@ -468,11 +537,11 @@ export const register: Register = (on, options) => {
         }
         // (A rocket acts its level out a stage at a time: its own strength is the one to hear.)
         const level = shownScene.strength
-        if (cfg.style !== sound.scene) {
+        if (driver.sceneName !== sound.scene) {
           stopSound()
-          sound.scene = cfg.style
+          sound.scene = driver.sceneName
         }
-        const mood = { scene: cfg.style, level, tint: driver.tint(), night: driver.isNight(), amb: shownScene.ambience?.() ?? {} }
+        const mood = { scene: driver.sceneName, level, tint: driver.tint(), night: driver.isNight(), amb: shownScene.ambience?.() ?? {} }
         const beds = bedStep(sound.bed, mood, sound.clock, sound.seed++)
         for (const id of beds.stop) {
           sound.takes.get(id)?.abort()
@@ -485,7 +554,7 @@ export const register: Register = (on, options) => {
           sound.lastBurst = sound.clock
           sound.nextBurst = sound.clock + SOUND_BURST_MS
           if (sound.queue.length) {
-            playWav(burst(sound.queue.map(e => ({ ...e, offset: Math.max(0, (e.at - from) / 1000) })), sound.seed++), master(cfg.style, shownScene.strength))
+            playWav(burst(sound.queue.map(e => ({ ...e, offset: Math.max(0, (e.at - from) / 1000) })), sound.seed++), master(driver.sceneName, shownScene.strength))
             sound.queue.length = 0
             sound.seen = 0
           }
@@ -528,7 +597,7 @@ export const register: Register = (on, options) => {
       if (blitAt >= 0 && ticks - blitAt < BLIT_STALE_TICKS) return pace
       scene.ensure(site.columns, site.rows)
       scene.step()
-      const cells = scene.frame()
+      const cells = driver.frame()
       if (cells === lastCells) return pace
       lastCells = cells
       const at = ticks
@@ -595,13 +664,28 @@ export const register: Register = (on, options) => {
 
   on('turn.start', ($, e, next) => {
     activity.turnStarted() // raised by the main loop only
+    activity.changed()
     return next(e)
   })
 
   on('turn.complete', ($, e, next) => {
     // Subagents' runs complete too; only the main loop's ends the turn.
-    if (e.agentId === undefined) activity.turnEnded()
+    if (e.agentId === undefined) {
+      activity.turnEnded()
+      activity.changed()
+    }
     return next(e)
+  })
+
+  // A permission asked of the person (a command to approve, a question, a plan)
+  // is a change of state, and so is the answer (the call going on to finish).
+  on('tool.check', async ($, e, next) => {
+    const result = await next(e)
+    if (e.agentId === undefined && e.tool_use_id !== undefined && result.decision === 'ask') {
+      asked.add(e.tool_use_id)
+      activity.changed()
+    }
+    return result
   })
 
   on('turn.step', async function* ($, e, next) {
@@ -630,6 +714,7 @@ export const register: Register = (on, options) => {
       return result
     } finally {
       activity.toolsInFlight--
+      if (asked.delete(e.tool_use_id)) activity.changed()
     }
   })
 
@@ -637,7 +722,10 @@ export const register: Register = (on, options) => {
     // `precompute` installs nothing, and a skipped compaction kept everything.
     if (e.trigger === 'precompute') return next(e)
     const result = await next(e)
-    if (!('skip' in result && result.skip)) activity.compacted()
+    if (!('skip' in result && result.skip)) {
+      activity.compacted()
+      activity.changed()
+    }
     return result
   })
 
@@ -721,7 +809,7 @@ export const register: Register = (on, options) => {
     mounted = { requestId: e.requestId, columns, rows }
     const scene = driver.dial()
     scene.ensure(columns, rows)
-    lastCells = scene.frame()
+    lastCells = driver.frame()
     const { Raster } = $.ui.resolve(e)
     return <Raster key={KEY} columns={columns} rows={rows} cells={lastCells} />
   })
@@ -748,7 +836,7 @@ export const register: Register = (on, options) => {
     mounted = { requestId: e.requestId, columns, rows }
     const scene = driver.dial()
     scene.ensure(columns, rows)
-    lastCells = scene.frame()
+    lastCells = driver.frame()
 
     // The engine keeps one blank spacer row between the band and the prompt;
     // it is outside the band, so the scene's base sits one row above the input.

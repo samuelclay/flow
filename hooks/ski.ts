@@ -1,4 +1,4 @@
-// REVISION: flow-v105-free-turns
+// REVISION: flow-v106-hue
 //
 // A skier on a mountain, on the fire's dials: the level is the speed and the
 // steepness. At 1 the skier stands at the top of the run, poles planted,
@@ -1446,5 +1446,6 @@ export const skiScene = defineScene({
   aliases: ['snow'],
   blurb: 'a skier down the mountain',
   night: true,
+  hue: { key: 251, range: 45, spread: 60 },
   make: seed => new Ski(seed),
 })

@@ -1,4 +1,4 @@
-// REVISION: flow-v104-sound-stream
+// REVISION: flow-v105-hue
 //
 // Bubbles (the `bubbles` style): a glass of fizz on the same dials as the
 // fire; the level is the fizz. At 1 a couple of airstones let lazy bubbles
@@ -460,5 +460,6 @@ export const bubblesScene = defineScene({
   name: 'bubbles',
   blurb: 'bubbles fizzing up',
   night: true,
+  hue: { key: 254, range: 90, spread: 60 },
   make: seed => new Bubbles(seed),
 })

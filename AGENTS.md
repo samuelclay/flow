@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Flow: ambient terminal scenes that move with a coding agent's work. One codebase runs as a Claude Code mod (a plugin of function hooks, early access) and as a [pi](https://github.com/badlogic/pi-mono) extension. This repo is both the plugin and its own marketplace. User-facing docs are in `README.md`; this file is for working on the code.
+Flow: ambient terminal scenes that move with a coding agent's work. One codebase runs as a Claude Code mod (a plugin of function hooks, early access) and as a [pi](https://github.com/badlogic/pi-mono) extension. [crabigator](https://github.com/conesus/crabigator) carries a Rust port of the scenes for a column of its own (its `src/flow/FORK.md` tracks what it has taken from here). This repo is both the plugin and its own marketplace. User-facing docs are in `README.md`; this file is for working on the code.
 
 ## Layout
 
@@ -15,9 +15,12 @@ hooks/
   svg.ts             Claude desktop: a frame's cells as a PNG inside one Svg (pure, unit-tested)
   sound.ts           soundscapes: each scene's layers of clips and its events' clips, levels, small events synthesized (pure)
   sound-files.ts     every clip in sounds/ and each mood's bed gain (written by scripts/make-sounds.ts)
-  scene.ts           SceneDriver: shared by both adapters (scene per style, level, dials, pace)
+  scene.ts           SceneDriver: shared by every adapter (scene per style, the random pick, level, dials,
+                     pace, the palette: adapters draw driver.cells() / driver.frame(), not the scene's grid)
   settings.ts        FlowConfig, the /flow grammar, every reply's wording (pure)
-  activity.ts        how busy the agent is: work → level and tint (pure, unit-tested)
+  activity.ts        how busy the agent is: work → level and tint; fade (pure, unit-tested)
+  palette.ts         a colour per session: an OKLCH hue turn of each finished frame, the named hues (pure)
+  pick.ts            random scenes and hues: the shuffle bags sessions draw from (pure)
   styles.ts          SCENES (the one list of scenes), the Scene interface and Tint, makeScene; the fire (Ember)
   scene-def.ts       SceneDef / defineScene: what a scene file exports so it can be listed
   pixel-scene.ts     PixelScene: the quick base for a scene that paints pixels (easing, fold, specks, level 0)
@@ -48,8 +51,9 @@ A scene implements `Scene` (`hooks/styles.ts`). Its file exports a `SceneDef` (`
   - `coverageBoost`: above 0 while subagents run. Add company (more boats, wingmen, a wider fire).
   - `tint`: `'smoke'` (a failed command or compaction) or `'blue'` (context nearly full). Must be clearly visible in every scene, at every level, in both layouts.
   - `night`: for scenes with a night version. Ease a `kNight` toward it rather than switching in one frame. Use `night.ts` so every night matches.
+- **Hue** (`SceneDef.hue`): the scene's main OKLCH hue (`key`), how far a palette may turn it (`range`, 180 for any way), and, for a scene whose accents must keep their colours (a sky with a balloon in it), how near `key` a colour must be to turn at all (`spread`). The palette turns every finished frame in the driver, so a scene draws in its own colours and never knows; check a few with `npm run preview -- <scene> --hue violet`. A target hue maps into `range` in proportion, so a scene that turns less still gets a different look for each.
 - **Sound** (`hooks/sound.ts`, see *Soundscapes* below): a scene's bed is layers of clips (`LAYERS`) at gains from the level and its `ambience()`, mixed ahead for each of its moods (`MOODS`); its events (`sounds`, an array the scene pushes `{ kind, v }` onto as things happen on screen, through `hear`, which caps it: an adapter that never takes them, like pi, stays bounded; pi drains them each frame) play a clip (`EVENTS`) or, small and dense ones, a synthesized burst (`VOICES`). A scene without layers is silent.
-- **Sizes**: the band is 5 rows × 80–250 columns, above the prompt. The spine is a pane about 13–22 columns × 30–60 rows. Every scene must look right in both.
+- **Sizes**: the band is 5 rows × 80–250 columns, above the prompt. The spine is a pane about 13–22 columns × 30–60 rows. crabigator's column is about 15–40 columns × 4–12 rows (`isTall` keeps a wide box on the band layouts). Every scene must look right in all three (`npm run preview -- <scene> --box`).
 - **Drawing**:
   - Most scenes paint a pixel layer at 2 × 2 pixels per cell, then fold it into quadrant glyphs with `fitQuad`. A cell holds only two colors; pass `fitQuad`'s `keep` for a sprite's pixels so a small figure never drops out of its own cell.
   - Braille (`BRAILLE`, 2 × 4 dots a cell) is for fine specks: spray, stars, bubbles.
@@ -88,6 +92,9 @@ The engine validates the module before it runs (`claude plugin validate .`):
 - pi keeps its settings in `~/.pi/agent/flow.json`.
 - The band and the spine's pane show only while the scene does (`SceneDriver.isShown()`): `/flow off`, or auto's dark idle between turns, gives their rows back. The pane is closed by the plugin then (so the layout stays spine; only you closing it means you'd rather have the band) and reopens with the scene.
 - `/flow` is the only command. Don't add aliases.
+- `random` (scene) and `color random` draw from shuffle bags in `$.store` (`sceneBag`, `hueBag`) as a session opens; what a session drew stays in session state (`flow.pick`) through reloads. Code that means "the scene showing" reads `driver.sceneName`, never `cfg.style`.
+- Fade (`fade: on`): `Activity.changed()` at each change of state (a turn starting or ending, a `tool.check` that asks the person and the call's end, a compaction) relights the scene; `strengthFaded` eases it back over `FADE_MS`.
+- Inside crabigator (`CRABIGATOR_FLOW` set) the driver is `external`: the band, the spine and the sound stay off.
 - One-time tips (`nextTip` in `settings.ts`, kept in `$.store` under `tips`): at the first chance (a `/flow`, or an interactive session starting, as a toast) while it's still the fire and no other scene has been on, the other scenes; three chances later, if the sound has never been on, the sound.
 
 ## Development

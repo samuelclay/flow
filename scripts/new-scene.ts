@@ -1,4 +1,4 @@
-// REVISION: flow-v81-scene-tools
+// REVISION: flow-v82-hue
 //
 // Starts a new scene: writes hooks/<name>.ts from a template that already
 // moves with the level, shows the tints and (with --night) has a night,
@@ -6,7 +6,9 @@
 //
 //   npm run new-scene -- aurora --blurb "curtains of light that ripple faster with the work" --night
 //
-// Then: `npm run preview -- aurora`, edit hooks/aurora.ts, `npm run check`.
+// Then: `npm run preview -- aurora`, edit hooks/aurora.ts, `npm run check`,
+// and set its `hue` (its main OKLCH hue, and how far a palette may turn it:
+// `npm run preview -- aurora --hue violet` shows one).
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
@@ -82,6 +84,8 @@ ${night ? `    // At night: a dark sky behind it, and stars as braille dots.
 export const ${defName} = defineScene({
   name: '${name}',
   blurb: '${(blurb ?? `TODO: a few words on what ${name} shows`).replace(/'/g, "\\'")}',${night ? '\n  night: true,' : ''}
+  // TODO: its main hue (OKLCH degrees) and how far a palette may turn it (180: any way).
+  hue: { key: 0, range: 180 },
   make: seed => new ${Class}(seed),
 })
 `,

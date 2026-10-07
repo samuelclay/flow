@@ -1,4 +1,4 @@
-// REVISION: flow-v104-sound-stream
+// REVISION: flow-v105-hue
 //
 // A hot-air balloon in the sky world (sky.ts): the level is its target
 // altitude. At 1 it sits on the grass among trees and houses; it climbs past
@@ -128,5 +128,6 @@ export const balloonScene = defineScene({
   name: 'balloon',
   blurb: 'a hot-air balloon that climbs from the grass to space',
   night: true,
+  hue: { key: 251, range: 45, spread: 60 },
   make: seed => new Balloon(seed),
 })

@@ -1,9 +1,10 @@
-// REVISION: flow-v105-tips
+// REVISION: flow-v106-fade-random-color
 //
 // Flow's settings and the `/flow` command's grammar, shared by every harness adapter (Claude Code's
 // register.tsx, pi's pi/index.ts). Pure: no engine imports. Replies carry no
 // `flow:` prefix: Claude Code adds the plugin's name itself; pi's adapter adds it.
 
+import { HUE_NAMES, hueNamed, type HueName } from './palette'
 import { hasNight, nextStyle, STYLES, styleNamed, type SceneName } from './styles'
 
 export type FlowMode = 'auto' | 'manual'
@@ -25,16 +26,26 @@ const LAYOUTS: ReadonlyMap<string, FlowLayout> = new Map([
 export type FlowTime = 'clock' | 'day' | 'night'
 /** Each scene's soundscape: off (the default) or on. */
 export type FlowSound = 'off' | 'on'
+/** A scene by name, or `random`: one picked as each session opens. */
+export type FlowStyle = SceneName | 'random'
+/** Fade: each change of state relights the scene, easing back down over two minutes. */
+export type FlowFade = 'off' | 'on'
+/** The scene's colours as drawn (`natural`), turned to a named hue, or a hue picked as each session opens. */
+export type FlowColor = 'natural' | 'random' | HueName
 export type FlowConfig = {
   mode: FlowMode
-  style: SceneName
+  style: FlowStyle
   /** Auto mode while idle: 1 a low glow, 0 dark (the band gives its rows back). */
   idle: 0 | 1
   level: number
   layout: FlowLayout
   time: FlowTime
   sound: FlowSound
+  fade: FlowFade
+  color: FlowColor
 }
+/** What shows now, where a setting leaves it to chance: the scene and its colour's name. */
+export type Shown = { scene: SceneName; palette: string }
 /** The local time of day, as the adapter last read it. */
 export type Clock = { hour: number; minute: number }
 
@@ -58,13 +69,20 @@ export function readConfig(options: Readonly<Record<string, unknown>> | undefine
   const level = Number(o.level)
   return {
     mode: o.mode === 'manual' ? 'manual' : 'auto',
-    style: (typeof o.style === 'string' && styleNamed(o.style)) || 'fire',
+    style: o.style === 'random' ? 'random' : (typeof o.style === 'string' && styleNamed(o.style)) || 'fire',
     idle: o.idle === 'dark' ? 0 : 1, // `glow`, and `pilot` from before
     level: Number.isInteger(level) && level >= 0 && level <= 10 ? level : DEFAULT_LEVEL,
     layout: o.layout === 'spine' ? 'spine' : 'band',
     time: o.time === 'day' || o.time === 'night' ? o.time : 'clock',
     sound: o.sound === 'on' ? 'on' : 'off',
+    fade: o.fade === 'on' ? 'on' : 'off',
+    color: o.color === 'random' ? 'random' : hueNamed(o.color) ?? 'natural',
   }
+}
+
+/** The scene showing: the one picked when the style is random (fire until one is). */
+function sceneOf(cfg: FlowConfig, shown?: Shown): SceneName {
+  return shown?.scene ?? (cfg.style === 'random' ? 'fire' : cfg.style)
 }
 
 /** A setting as it is stored (idle reads `glow` / `dark`). */
@@ -80,12 +98,16 @@ export type FlowCommand =
   | { kind: 'idle'; level: 0 | 1 }
   /** A fixed level; none given holds the configured one. */
   | { kind: 'manual'; level?: number }
-  /** A scene (none given: the next one), optionally with the time of day too. */
-  | { kind: 'style'; name?: SceneName; time?: FlowTime }
+  /** A scene or `random` (none given: the next one), optionally with the time of day too. */
+  | { kind: 'style'; name?: FlowStyle; time?: FlowTime }
   | { kind: 'layout'; layout?: FlowLayout }
   | { kind: 'time'; time: FlowTime }
   /** Sound on or off; none given toggles it. */
   | { kind: 'sound'; sound?: FlowSound }
+  /** Fade on or off; none given toggles it. */
+  | { kind: 'fade'; fade?: FlowFade }
+  /** A colour; none given: the next named hue. */
+  | { kind: 'color'; color?: FlowColor }
   | { kind: 'error'; text: string }
 
 const SCENES = STYLES.join(', ')
@@ -126,6 +148,18 @@ export function parseFlowArgs(args: string): FlowCommand {
     if (b === 'on' || b === 'off') return { kind: 'sound', sound: b }
     return { kind: 'error', text: '! `/flow sound` toggles the soundscape, or `/flow sound on` / `/flow sound off`' }
   }
+  if (a === 'fade') {
+    if (b === undefined) return { kind: 'fade' }
+    if (b === 'on' || b === 'off') return { kind: 'fade', fade: b }
+    return { kind: 'error', text: '! `/flow fade` toggles fading, or `/flow fade on` / `/flow fade off`' }
+  }
+  if (a === 'color' || a === 'colour') {
+    if (b === undefined) return { kind: 'color' }
+    if (b === 'natural' || b === 'random') return { kind: 'color', color: b }
+    const hue = hueNamed(b)
+    if (hue) return { kind: 'color', color: hue }
+    return { kind: 'error', text: `! \`/flow color natural\`, \`/flow color random\` or a hue: ${HUE_NAMES.join(', ')}` }
+  }
   // `style <name>`, from before scenes were picked by name alone.
   if (a === 'style' && b !== undefined) return sceneCommand(b, undefined)
   // A scene and a time of day, either way round: `/flow surf night`.
@@ -154,12 +188,20 @@ export function parseFlowArgs(args: string): FlowCommand {
 
 /** A scene by name, or an error that lists them. */
 function sceneCommand(word: string, time: FlowTime | undefined): FlowCommand {
-  const name = styleNamed(word)
+  const name = word === 'random' ? 'random' : styleNamed(word)
   if (name) return time ? { kind: 'style', name, time } : { kind: 'style', name }
   return { kind: 'error', text: `! no scene "${word}" — the scenes are ${SCENES} (\`/flow next\` cycles them)` }
 }
 
 const pad = (n: number) => String(n).padStart(2, '0')
+
+/** The scene as it reads: `surf`, `violet fire`, or `random: violet fire`. */
+function sceneText(cfg: FlowConfig, shown?: Shown): string {
+  const scene = sceneOf(cfg, shown)
+  const palette = shown?.palette ?? (cfg.color === 'random' ? 'natural' : cfg.color)
+  const named = palette === 'natural' ? scene : `${palette} ${scene}`
+  return cfg.style === 'random' ? `random: ${named}` : named
+}
 
 /** How the time of day reads: `night`, or `day (clock 08:54)` when the clock decides. */
 function timeText(cfg: FlowConfig, clock: Clock): string {
@@ -173,18 +215,19 @@ const TINTS: Record<string, string> = { smoke: 'after a failure', blue: 'context
 const BACK_TO_AUTO = '`/flow auto` to follow the work again'
 
 /** `/flow` with no arguments: the scene, the mode and level now, any tint, the time of day. */
-export function statusText(cfg: FlowConfig, levelNow: number, tint: string, clock: Clock): string {
-  const parts = [`${cfg.style}`]
+export function statusText(cfg: FlowConfig, levelNow: number, tint: string, clock: Clock, shown?: Shown): string {
+  const scene = sceneOf(cfg, shown)
+  const parts = [sceneText(cfg, shown)]
   parts.push(
     cfg.mode === 'auto'
-      ? `auto, now ${label(levelNow)} (idle ${cfg.idle === 0 ? 'dark' : 'glow'})`
+      ? `${cfg.fade === 'on' ? 'auto, fading' : 'auto'}, now ${label(levelNow)} (idle ${cfg.idle === 0 ? 'dark' : 'glow'})`
       : cfg.level === 0
         ? 'off'
         : `holding ${label(cfg.level)}`,
   )
   if (cfg.mode === 'auto' && TINTS[tint]) parts.push(TINTS[tint]!)
-  if (hasNight(cfg.style)) parts.push(timeText(cfg, clock))
-  else if (cfg.time !== 'clock') parts.push(`${cfg.time} pinned (${cfg.style} has no night)`)
+  if (hasNight(scene)) parts.push(timeText(cfg, clock))
+  else if (cfg.time !== 'clock') parts.push(`${cfg.time} pinned (${scene} has no night)`)
   if (cfg.layout === 'spine') parts.push('spine')
   if (cfg.sound === 'on') parts.push('sound on')
   return `${parts.join(', ')}\nscenes: ${SCENES} · \`/flow next\` for another · \`/flow help\``
@@ -196,12 +239,16 @@ export function helpText(agent = "Claude's", panes = true): string {
     'ambient scenes that move with the work',
     `  /flow <name>          pick a scene: ${SCENES}`,
     '  /flow next            the next scene',
+    '  /flow random          a scene picked as each session opens',
+    '  /flow color <hue>     the scene in another hue: natural, random (one per session), or',
+    `                        ${HUE_NAMES.join(', ')}`,
     `  /flow day | night     pin the time of day (${STYLES.filter(hasNight).join(', ')})`,
     '  /flow clock           day or night by your clock (night 19:00 to 7:00)',
     '  /flow <name> night    a scene and a time of day at once',
     `  /flow auto            move with ${agent} work (the default)`,
     '  /flow 1-10 | off      hold a level (10 is the busiest), or switch it off',
     '  /flow idle glow|dark  in auto mode while idle: a low glow, or nothing',
+    '  /flow fade [on|off]   each change of state relights it; it fades back over two minutes',
     '  /flow sound [on|off]  a soundscape for each scene, swelling with the work (macOS); alone, toggles it',
   ]
   if (panes) {
@@ -211,11 +258,11 @@ export function helpText(agent = "Claude's", panes = true): string {
   return lines.join('\n')
 }
 
-/** The changes a parsed command makes, or none for `show` / `help` / `error`. */
-export function changesFor(cmd: FlowCommand, cfg: FlowConfig): Partial<FlowConfig> | undefined {
+/** The changes a parsed command makes, or none for `show` / `help` / `error` (`shown`: what shows now). */
+export function changesFor(cmd: FlowCommand, cfg: FlowConfig, shown?: Shown): Partial<FlowConfig> | undefined {
   switch (cmd.kind) {
     case 'style': {
-      const style = cmd.name ?? nextStyle(cfg.style)
+      const style = cmd.name ?? nextStyle(sceneOf(cfg, shown))
       return cmd.time ? { style, time: cmd.time } : { style }
     }
     case 'auto':
@@ -230,18 +277,35 @@ export function changesFor(cmd: FlowCommand, cfg: FlowConfig): Partial<FlowConfi
       return { time: cmd.time }
     case 'sound':
       return { sound: cmd.sound ?? (cfg.sound === 'on' ? 'off' : 'on') }
+    case 'fade':
+      return { fade: cmd.fade ?? (cfg.fade === 'on' ? 'off' : 'on') }
+    case 'color': {
+      if (cmd.color) return { color: cmd.color }
+      const now = hueNamed(cfg.color) ?? hueNamed(shown?.palette)
+      return { color: HUE_NAMES[now ? (HUE_NAMES.indexOf(now) + 1) % HUE_NAMES.length : 0]! }
+    }
     default:
       return undefined
   }
 }
 
 /** What `/flow` answers once a change is applied. */
-export function changedText(cmd: FlowCommand, cfg: FlowConfig, agent: string, clock: Clock): string {
+export function changedText(cmd: FlowCommand, cfg: FlowConfig, agent: string, clock: Clock, shown?: Shown): string {
+  const scene = sceneOf(cfg, shown)
   switch (cmd.kind) {
     case 'style': {
-      const time = hasNight(cfg.style) ? `, ${timeText(cfg, clock)}` : ''
-      return `${cfg.style}${time} · \`/flow next\` for another`
+      const time = hasNight(scene) ? `, ${timeText(cfg, clock)}` : ''
+      const what = cfg.style === 'random' ? `${sceneText(cfg, shown)} (a scene picked as each session opens)` : sceneText(cfg, shown)
+      return `${what}${time} · \`/flow next\` for another`
     }
+    case 'fade':
+      return cfg.fade === 'on'
+        ? 'fade on — each change of state relights the scene; it fades back over two minutes'
+        : 'fade off — the scene follows the work as it goes'
+    case 'color':
+      return cfg.color === 'random'
+        ? `${sceneText(cfg, shown)} — a colour picked as each session opens`
+        : `${sceneText(cfg, shown)} · \`/flow color\` for another, \`/flow color natural\` for its own`
     case 'auto':
       return `auto — moves with ${agent} work`
     case 'idle':
@@ -257,9 +321,9 @@ export function changedText(cmd: FlowCommand, cfg: FlowConfig, agent: string, cl
         cfg.time === 'clock'
           ? `day and night follow your clock, ${timeText(cfg, clock)} now (night is ${NIGHT_FROM}:00 to ${DAY_FROM}:00)`
           : `${cfg.time} until \`/flow clock\``
-      const applies = hasNight(cfg.style)
+      const applies = hasNight(scene)
         ? ''
-        : ` (${cfg.style} has no night; it shows in ${STYLES.filter(hasNight).join(', ')})`
+        : ` (${scene} has no night; it shows in ${STYLES.filter(hasNight).join(', ')})`
       return `${what}${applies}`
     }
     default:

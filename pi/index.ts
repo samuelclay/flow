@@ -1,4 +1,4 @@
-// REVISION: flow-v62-drain
+// REVISION: flow-v63-fade-random-color
 //
 // Flow for pi (badlogic/pi-mono), by Rob Macrae: the same ambient
 // scenes as the Claude Code mod, in a widget above pi's editor. pi's events
@@ -13,6 +13,10 @@
 //   session_compact               so does a compaction
 //   ctx.getContextUsage()         a nearly-full context shows as blue
 //
+// With fade on, a turn starting or ending (and a compaction) relights the
+// scene, and it eases down over two minutes. `random` scenes and colours are
+// drawn as the session starts.
+//
 // `/flow` takes the same arguments
 // as in Claude Code, day and night following the local clock unless pinned;
 // settings persist in ~/.pi/agent/flow.json (read from the old
@@ -24,6 +28,8 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 import { Activity } from '../hooks/activity'
+import { HUES, HUE_NAMES } from '../hooks/palette'
+import { STYLES } from '../hooks/styles'
 import { FRAME_MS, SceneDriver } from '../hooks/scene'
 import {
   changedText,
@@ -112,7 +118,8 @@ export default function flow(pi: PiApi) {
       render(w: number) {
         if (w !== width) {
           width = w
-          lines = gridToAnsi(dial().grid())
+          dial()
+          lines = gridToAnsi(driver.cells())
         }
         return lines
       },
@@ -151,7 +158,7 @@ export default function flow(pi: PiApi) {
       f.step()
       // pi has no player: a scene's events (for Claude Code's soundscape) are taken and dropped each frame.
       if (f.sounds) f.sounds.length = 0
-      lines = gridToAnsi(f.grid())
+      lines = gridToAnsi(driver.cells())
       tui.requestRender()
     }
     const pace = driver.pace()
@@ -167,6 +174,9 @@ export default function flow(pi: PiApi) {
     if (ctx.mode !== 'tui' || !ctx.hasUI) return
     ctxRef = ctx
     driver.apply(await loadSettings())
+    // What `random` shows this session (scene and colour), drawn now.
+    driver.pick = STYLES[Math.floor(Math.random() * STYLES.length)]!
+    driver.pickHue = HUES[HUE_NAMES[Math.floor(Math.random() * HUE_NAMES.length)]!]
     readClock()
     stop()
     isMounted = false
@@ -181,8 +191,14 @@ export default function flow(pi: PiApi) {
     ctxRef = undefined
   })
 
-  pi.on('agent_start', () => activity.turnStarted())
-  pi.on('agent_end', () => activity.turnEnded())
+  pi.on('agent_start', () => {
+    activity.turnStarted()
+    activity.changed()
+  })
+  pi.on('agent_end', () => {
+    activity.turnEnded()
+    activity.changed()
+  })
   pi.on('turn_start', (_e, ctx) => activity.modelStep(effortOf(ctx.thinkingLevel)))
 
   pi.on('message_update', e => {
@@ -204,7 +220,10 @@ export default function flow(pi: PiApi) {
     if (COMMAND_TOOLS.has(e.toolName) && e.isError) activity.failed()
   })
 
-  pi.on('session_compact', () => activity.compacted())
+  pi.on('session_compact', () => {
+    activity.compacted()
+    activity.changed()
+  })
 
   /** pi shows a reply bare, so it says whose it is (Claude Code adds the name itself). */
   const say = (text: string) => `flow: ${text}`
@@ -213,7 +232,7 @@ export default function flow(pi: PiApi) {
     const cmd = parseFlowArgs(args)
     readClock()
     if (cmd.kind === 'show') {
-      ctx.ui.notify(say(statusText(cfg, driver.level(), driver.tint(), driver.clock)))
+      ctx.ui.notify(say(statusText(cfg, driver.level(), driver.tint(), driver.clock, driver.shown())))
       return
     }
     if (cmd.kind === 'help') {
@@ -228,7 +247,7 @@ export default function flow(pi: PiApi) {
       ctx.ui.notify('flow: pi has no side panes, so the scene stays in the band above the editor', 'warning')
       return
     }
-    const changes = changesFor(cmd, cfg) ?? {}
+    const changes = changesFor(cmd, cfg, driver.shown()) ?? {}
     driver.apply(changes)
     width = 0 // redraw at once in the new look
     sync(ctx)
@@ -238,11 +257,11 @@ export default function flow(pi: PiApi) {
     } catch {
       note = '  (not saved)'
     }
-    ctx.ui.notify(say(`${changedText(cmd, cfg, "pi's", driver.clock)}${note}`))
+    ctx.ui.notify(say(`${changedText(cmd, cfg, "pi's", driver.clock, driver.shown())}${note}`))
   }
   pi.registerCommand('flow', {
     description:
-      'Ambient scenes above the editor: /flow [<scene> | next | day | night | clock | auto | 1-10 | off | help]',
+      'Ambient scenes above the editor: /flow [<scene> | next | random | color | fade | day | night | clock | auto | 1-10 | off | help]',
     handler,
   })
 }

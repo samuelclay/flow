@@ -1,4 +1,4 @@
-// REVISION: flow-v111-held
+// REVISION: flow-v112-hue
 //
 // Surf (the `surf` style): a surfer and the ocean on the same dials as the
 // fire; the level is the swell. At 1 the sea is glassy under a dawn sky and
@@ -1024,5 +1024,6 @@ export const surfScene = defineScene({
   aliases: ['ocean', 'sea'],
   blurb: 'a surfer and the swell',
   night: true,
+  hue: { key: 244, range: 45, spread: 60 },
   make: seed => new Surf(seed),
 })

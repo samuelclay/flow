@@ -1,4 +1,4 @@
-// REVISION: flow-v104-sound-stream
+// REVISION: flow-v105-hue
 //
 // The scenes, all driven by the same dials (strength 0..10, coverage boost,
 // tint, night): SCENES, the one list of them (each scene file exports its
@@ -14,6 +14,7 @@ export type { Cells }
 import { heatColor, smokeColor } from './fire-palette'
 import { BRAILLE, mix } from './pixels'
 import { defineScene, type SceneDef } from './scene-def'
+import type { SceneHue } from './palette'
 import type { Ambience, SoundEvent } from './sound'
 import { balloonScene } from './balloon'
 import { avalonScene } from './colony'
@@ -53,6 +54,11 @@ function defOf(style: SceneName): SceneDef {
 
 export function makeScene(style: SceneName, seed?: number): Scene {
   return defOf(style).make(seed)
+}
+
+/** A scene's main hue and how far a palette may turn it. */
+export function sceneHue(style: SceneName): SceneHue {
+  return defOf(style).hue
 }
 
 /** Whether a scene has a night as well as a day. */
@@ -181,7 +187,7 @@ class Ember implements Scene {
           }
         }
         if (tip < 0 || this.rng.f() >= chance) continue
-        // A pilot only lets off the odd wisp of smoke, never a spark.
+        // Embers only let off the odd wisp of smoke, never a spark.
         const heat = s === 1 ? SMOKE_AT : 0.72 + 0.25 * this.rng.f()
         if (heat > SMOKE_AT && this.sounds.length < 16) this.sounds.push({ kind: 'crack', v: heat })
         this.sparks.push({
@@ -259,6 +265,7 @@ const fireScene = defineScene({
   blurb: 'a ░▒▓█ fire with sparks and smoke',
   // The fire had two looks once; the softer one, `ember`, is now the fire.
   aliases: ['classic', 'ember', 'inferno', 'flame'],
+  hue: { key: 43, range: 180 },
   make: seed => new Ember(seed),
 })
 

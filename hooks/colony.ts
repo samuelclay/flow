@@ -1,4 +1,4 @@
-// REVISION: flow-v106-held
+// REVISION: flow-v107-hue
 //
 // A colony ship on the same dials as the fire: the level is its speed. A
 // long ship like the Avalon holds steady (nose to the right in the band,
@@ -781,5 +781,6 @@ export const avalonScene = defineScene({
   name: 'avalon',
   aliases: ['colony', 'interstellar'],
   blurb: 'a colony ship whose shield burns up the asteroids that hit it',
+  hue: { key: 240, range: 180 },
   make: seed => new Colony(seed),
 })

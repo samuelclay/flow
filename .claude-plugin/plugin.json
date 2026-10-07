@@ -28,10 +28,20 @@
         "manual"
       ]
     },
+    "fade": {
+      "type": "string",
+      "title": "Fade",
+      "description": "on: each change of state (a turn starting or ending, a permission asked) relights the scene, and it fades back to its base over two minutes, so a bright scene has just changed and embers have sat a while; off: it follows the work as it goes",
+      "default": "off",
+      "options": [
+        "off",
+        "on"
+      ]
+    },
     "style": {
       "type": "string",
       "title": "Scene",
-      "description": "fire: a ░▒▓█ fire with sparks and smoke; warp: stars that speed up to hyperspace; avalon: a colony ship whose shield burns up the asteroids that hit it; balloon: a hot-air balloon that climbs from the grass to space; engine: a steampunk engine that runs up to full speed; falcon: a Falcon 9 carrying Dragon: its booster lands on its legs, Dragon comes home under parachutes to a splashdown; starship: a bigger rocket that hot-stages: its booster is caught by the tower's arms, the Ship splashes down; surf: a surfer and the swell; ski: a skier down the mountain; bubbles: bubbles fizzing up",
+      "description": "fire: a ░▒▓█ fire with sparks and smoke; warp: stars that speed up to hyperspace; avalon: a colony ship whose shield burns up the asteroids that hit it; balloon: a hot-air balloon that climbs from the grass to space; engine: a steampunk engine that runs up to full speed; falcon: a Falcon 9 carrying Dragon: its booster lands on its legs, Dragon comes home under parachutes to a splashdown; starship: a bigger rocket that hot-stages: its booster is caught by the tower's arms, the Ship splashes down; surf: a surfer and the swell; ski: a skier down the mountain; bubbles: bubbles fizzing up; random: a scene picked as each session opens",
       "default": "fire",
       "options": [
         "fire",
@@ -43,7 +53,32 @@
         "starship",
         "surf",
         "ski",
-        "bubbles"
+        "bubbles",
+        "random"
+      ]
+    },
+    "color": {
+      "type": "string",
+      "title": "Scene colour",
+      "description": "natural: the scene's own colours; random: a hue picked as each session opens, so sessions side by side differ; or a hue to turn it to (a fire turns any way, a sky only a little)",
+      "default": "natural",
+      "options": [
+        "natural",
+        "random",
+        "rose",
+        "crimson",
+        "ember",
+        "amber",
+        "gold",
+        "lime",
+        "jade",
+        "teal",
+        "cyan",
+        "azure",
+        "blue",
+        "indigo",
+        "violet",
+        "magenta"
       ]
     },
     "idle": {

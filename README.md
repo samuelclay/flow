@@ -55,7 +55,7 @@ Every scene has a level from 0 (off) to 10 (as busy as it gets).
 
 | Scene | At 1 | At 10 |
 |---|---|---|
-| `fire` | a low glow of embers | a roaring fire throwing sparks |
+| `fire` | a low glow of embers (in the fire's own hue) | a roaring fire throwing sparks |
 | `warp` | stars drifting past | hyperspace streaks |
 | `avalon` | a colony ship among still stars, its habitat turning, the odd rock burning up on its shield | stars streaking past, rocks flaring on the shield every second |
 | `balloon` | a hot-air balloon on the grass | up through the clouds to the edge of space |
@@ -68,6 +68,22 @@ Every scene has a level from 0 (off) to 10 (as busy as it gets).
 Some scenes also answer to other names: `inferno` and `flame` (fire), `stars` (warp), `colony` and `interstellar` (avalon), `mechanism` (engine), `rocket` (falcon), `spaceship` (starship), `ocean` and `sea` (surf), `snow` (ski).
 
 Balloon, falcon, starship, surf and ski also have a **night** version: stars, a moon, and moonlit snow or water. By night, bubbles turns into a stout: pale tan bubbles rising through black. By default day and night follow your local clock (night is 19:00 to 7:00). `/flow day` or `/flow night` pins one.
+
+### A scene and a colour for each session
+
+Running several sessions side by side, you can tell them apart by their scenes:
+
+- **`/flow random`** picks a scene as each session opens. Sessions draw from a shared shuffle bag, so sessions opened one after another each get a different scene until every scene has had a turn.
+- **`/flow color`** turns the scene to another hue. A violet fire, an azure one, a crimson one: the scene keeps its shape and contrast, and only its hue moves.
+  - **`/flow color random`** picks a hue as each session opens, also from a shuffle bag.
+  - **`/flow color <hue>`** sets one hue: rose, crimson, ember, amber, gold, lime, jade, teal, cyan, azure, blue, indigo, violet or magenta.
+  - **`/flow color natural`** goes back to the scene's own colours.
+
+How far a hue reaches depends on the scene:
+- Fire, warp, avalon and the engine turn any way.
+- Bubbles turns part of the way.
+- The sky and sea scenes shift only their sky and water, and only a little: the balloon, the rocket's flame and the skier keep their own colours.
+- Greys and smoke stay grey, and the blue of a nearly-full context stays blue.
 
 ## What moves it (auto mode)
 
@@ -85,15 +101,29 @@ Balloon, falcon, starship, surf and ski also have a **night** version: stars, a 
 
 A plain answer sits around 5, edit-and-test loops reach about 8, and 10 takes several subagents editing in parallel, or a long turn: it climbs a level every 30 s it keeps going.
 
+### Fade
+
+With **`/flow fade on`** (or *Fade* in `/config`), the scene shows how recently something changed, instead of how busy the agent is. Every change of state relights it to full:
+- a turn starts or ends
+- a permission or a question is put to you, or answered
+- a compaction
+
+It then eases back down to its base over two minutes. A bright scene has just changed; embers have sat a while.
+
+The base is the turn's effort floor while the agent works, and the idle glow otherwise. Edits, commands and subagents still flare it on top, but a long turn no longer climbs. Fade is off by default.
+
 ## The command
 
-`/flow` changes things at once. The settings are also rows in `/config` (*Scene mode*, *Scene*, *Scene while idle*, *Manual level*, *Scene layout*, *Day or night*).
+`/flow` changes things at once. The settings are also rows in `/config` (*Scene mode*, *Fade*, *Scene*, *Scene colour*, *Scene while idle*, *Manual level*, *Scene layout*, *Day or night*, *Sound*).
 
 | Command | Effect |
 |---|---|
 | `/flow` | show the scene, mode, level and time of day |
 | `/flow <scene>` | pick a scene by name or alias (`/flow surf`, `/flow sea`) |
 | `/flow next` | the next scene |
+| `/flow random` | a scene picked as each session opens |
+| `/flow color <hue>` / `random` / `natural` | the scene in another hue; one picked as each session opens; or its own colours. Alone, the next hue |
+| `/flow fade` | toggle fade: each change of state relights the scene, and it fades back over two minutes; `/flow fade on` / `off` to set it |
 | `/flow day` / `night` | pin the time of day |
 | `/flow clock` | day or night by your local clock (the default) |
 | `/flow <scene> night` | a scene and a time of day at once |
@@ -131,7 +161,18 @@ The same scenes run as a pi extension (`pi/index.ts`): a widget above pi's edito
 | `session_compact` | so does a compaction |
 | `ctx.getContextUsage()` | a nearly-full context shows as blue |
 
-Settings persist in `~/.pi/agent/flow.json`. To try it without installing: `pi --extension ./pi/index.ts`.
+With fade on, a turn starting or ending (and a compaction) relights the scene. `random` scenes and colours are drawn as each session starts. Settings persist in `~/.pi/agent/flow.json`. To try it without installing: `pi --extension ./pi/index.ts`.
+
+## crabigator
+
+[crabigator](https://github.com/conesus/crabigator) wraps Claude Code, Codex, opencode and Grok and draws status widgets below them. It has its own Rust port of these scenes, and draws one as a column on the right of its widgets, about 15% of the width (from 100 terminal columns).
+
+In crabigator, each session gets its own scene and colour:
+- The scene is claimed so that no two live sessions share one until every scene is in use.
+- The colour is the hue of the session's identity chip.
+- The scene fades: every change of state relights it, so you can see at a glance which sessions just changed and which have sat a while.
+
+Inside crabigator, crabigator sets `CRABIGATOR_FLOW`, and this plugin's band stays dark, so the scene doesn't show twice. `npm run preview -- <scene> --box` previews a scene at the column's sizes.
 
 ## Cost
 
