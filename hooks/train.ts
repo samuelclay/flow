@@ -1,4 +1,4 @@
-// REVISION: flow-v170-dry-scenes
+// REVISION: flow-v191-small-column-trains
 //
 // Train (the `train` scene): a passenger train through the countryside on
 // the same dials as the fire; the level is its speed. At 1 it waits at a red
@@ -576,7 +576,8 @@ export class Train extends PixelScene {
     this.H = d.rows * 2
     this.tall = d.tall
     // The nose sits most of the way across the band, with enough line ahead to see a signal coming.
-    this.noseX = Math.max(2, this.W - Math.max(26, Math.round(this.W * 0.17))) & ~1
+    const ahead = this.smallBox ? Math.round(this.W * 0.25) : 26
+    this.noseX = Math.max(2, this.W - Math.max(ahead, Math.round(this.W * 0.17))) & ~1
     this.tx = clamp(Math.round(this.W * 0.36), 7, Math.max(7, this.W - 14))
     this.noseY = Math.max(4, Math.round(this.H * 0.22))
   }
@@ -774,6 +775,11 @@ export class Train extends PixelScene {
     }
   }
 
+  /** Crabigator's short column: show a locomotive and a companion's cab, with less room ahead. */
+  private get smallBox(): boolean {
+    return !this.tall && this.W <= 80 && this.H <= 24
+  }
+
   /** A companion's place alongside, by its slot (band pixels from the nose; negative, behind). */
   private station(slot: number): number {
     return -ALONGSIDE - slot * SPACING
@@ -781,14 +787,14 @@ export class Train extends PixelScene {
 
   /** The furthest back a companion can be and still show at least half of itself. */
   private inView(): number {
-    return this.tall ? 3 * (this.noseY - this.H + A_UNIT / 2) : UNIT / 2 - (this.noseX - 1)
+    return this.tall ? 3 * (this.noseY - this.H + A_UNIT / 2) : (this.smallBox ? Math.min(UNIT / 2, this.W * 0.3) : UNIT / 2) - (this.noseX - 1)
   }
 
   /** How many companions this view has room for: each place in view, however far it wanders back. */
   private crewRoom(): number {
     const least = this.inView()
     let n = 0
-    while (n < LIVERY.length && this.station(n) - SWAY >= least) n++
+    while (n < LIVERY.length && this.station(n) - (this.smallBox ? SWAY / 3 : SWAY) >= least) n++
     return n
   }
 
@@ -807,7 +813,7 @@ export class Train extends PixelScene {
       const ph = m.seed * 6.283
       const station = this.station(m.slot)
       const rest = Math.max(least, station - REST_BACK)
-      const sway = (Math.sin(d.t * 0.0037 + ph) * 7 + Math.sin(d.t * 0.0011 + ph * 2.3) * 5) * m.busy
+      const sway = (Math.sin(d.t * 0.0037 + ph) * 7 + Math.sin(d.t * 0.0011 + ph * 2.3) * 5) * m.busy * (this.smallBox ? 1 / 3 : 1)
       const at = rest + (station - rest) * m.busy + sway
       const out = far - UNIT - (m.leaving ? 40 : 0)
       m.x = out + (at - out) * m.here
