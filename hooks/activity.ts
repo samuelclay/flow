@@ -1,12 +1,18 @@
-// REVISION: flow-v64-fade-turns
+// REVISION: flow-v186-upstream-merge
 //
 // How busy the agent is: the work → scene mapping for `/flow auto`. Events
 // add "heat" (the metaphor from when the only scene was a fire), the heat
 // cools every frame, and `strength()` turns it into the scene's 0..=10 dial
 // (a fire's height, the swell, the balloon's altitude, ...), and a turn that
-// keeps going climbs a level every 30 s besides. It also says
-// which tint shows: smoke after a failure or a compaction, blue when the
-// context is nearly full. Pure: no `$`, so it is unit-tested directly.
+// keeps going climbs a level every 30 s besides (its clock stopped while it
+// waits on the person: a permission, a question, a plan). While one of those
+// is put to the person (a dialog is up for them, in any loop) the level
+// settles to a calm 2 and the scenes show it (`isAwaitingPerson`, waiting.ts).
+// It keeps what every loop waits on (waits.ts, one tracker for the main loop
+// and the subagents), says which tint shows: smoke after a failure or a
+// compaction, blue when the context is nearly full, and keeps the roster of
+// subagents, each on its own (agents.ts: the scenes' companions). Pure: no
+// `$`, so it is unit-tested directly.
 //
 // Fade (`/flow fade on`) adds freshness: each change of state (a turn
 // starting or ending, a question asked) relights the scene to full, and it
@@ -15,10 +21,13 @@
 // it ends, a bright scene has just changed and embers have sat a while.
 //
 // Calibrated so the range reads as work, not chatter (see the calibration
-// tests): a streamed answer sits mid-range, edits and commands flare above
-// it, a few subagents push it high, and 10 takes parallel work plus edits.
+// tests): a streamed answer sits mid-range, reads and any other tool (an MCP
+// server's) spark a little, edits and commands flare above it, a few
+// subagents push it high, and 10 takes parallel work plus edits.
 
+import { Roster } from './agents'
 import type { Tint } from './styles'
+import { Waits } from './waits'
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | number | undefined
 
@@ -30,14 +39,17 @@ const STREAM_PER_CHAR = 0.002
 const STREAM_CAP = 0.025
 /** Activity from a subagent's loop counts at this weight (its count adds the rest). */
 const SUBAGENT_WEIGHT = 0.5
-/** A turn's running time adds a level every TURN_STEP_MS (frames are 70 ms). */
-const FRAME_MS = 70
+/** A frame while busy (~14 fps): the heat model counts in these, slower ticks covering several. */
+export const FRAME_MS = 70
+/** A turn's running time adds a level every TURN_STEP_MS. */
 const TURN_STEP_MS = 30_000
 /** Frames of gray tips after a failed command / a compaction. */
 const FAIL_SMOKE = 30
 const COMPACT_SMOKE = 40
 /** Fade: how long a change of state takes to ease back to the base. */
 export const FADE_MS = 120_000
+/** The level a scene settles to while it waits on the person: calm, but above idle's glow (a rocket holds its stage there). */
+export const WAIT_LEVEL = 2
 
 export function effortFloor(effort: Effort): number {
   switch (effort) {
@@ -64,25 +76,85 @@ export class Activity {
   floor = 3
   smokeFrames = 0
   contextPercent = 0
-  /** Frames this turn has been running (none between turns). */
+  /** Frames this turn has been running (none between turns), not counting time it waited on the person. */
   turnFrames = 0
   /** Time since the state last changed, for fade (long past: nothing to relight). */
   sinceChangeMs = FADE_MS
+  /** The calls waiting on the person (a permission ask, a question, a plan to approve), in every loop. */
+  readonly waits = new Waits()
   /** Streamed characters since the last tick, weighted. */
   private pendingChars = 0
+  /** Each subagent on its own (working, quiet, waiting on you, done): the scenes' `agents` dial. */
+  readonly roster = new Roster(this.waits)
 
   private add(n: number): void {
     this.heat = Math.min(MAX_HEAT, this.heat + n)
   }
 
   turnStarted(): void {
+    this.changed()
     if (!this.isTurnActive) this.turnFrames = 0
     this.isTurnActive = true
   }
 
   turnEnded(): void {
+    this.changed()
     this.isTurnActive = false
     this.turnFrames = 0
+    // The main loop's waits end with its turn; a subagent's dialog still up (one running on in the background) doesn't.
+    this.waits.forget()
+  }
+
+  /** Nothing waits on the person any more, in any loop (the session is over). */
+  forgetWaits(): void {
+    this.waits.clear()
+  }
+
+  /**
+   * A call (in loop `agent`; none, the main loop) now waits on the person.
+   * `asked`: it's put to them now (Claude's question, a plan to approve). A
+   * permission ask isn't yet: the mode may settle it alone (auto mode's
+   * classifier), so it's only put to them once a dialog shows (`prompted`).
+   * The main loop's stops the turn's clock till it's answered.
+   */
+  waitingOn(id: string, asked = true, tool?: string, agent?: string): void {
+    this.waits.waitingOn(id, asked, tool, agent)
+    if (asked) this.changed()
+    if (agent !== undefined) this.roster.noted(agent)
+  }
+
+  /** A call of `tool` in loop `agent` (none: the main loop) starts: noted, so its progress pill can end a wait on it. */
+  called(id: string, tool: string, agent?: string, args?: object): void {
+    this.waits.called(id, tool, agent, args)
+  }
+
+  /** A permission dialog shows for a call of `tool` in loop `agent` (none: the main loop; its `input`, to tell it from another call of the tool). */
+  prompted(tool: string, agent?: string, input?: unknown): void {
+    this.waits.prompted(tool, agent, input)
+    this.changed()
+    if (agent !== undefined) this.roster.noted(agent)
+  }
+
+  /** The call is answered (or over, or running): the clock goes on, unless another still holds it. */
+  answered(id: string, tool?: string, agent?: string): void {
+    const wasWaiting = this.isAwaitingPerson
+    const loop = this.waits.answered(id, tool, agent)
+    if (wasWaiting !== this.isAwaitingPerson) this.changed()
+    if (loop !== undefined) this.roster.settled(loop)
+  }
+
+  /**
+   * Whether the turn's clock stands still: one of the main loop's calls waits
+   * (on the person, or the mode deciding whether to ask them), or a dialog of
+   * any loop is up for the person. A subagent's ask the mode is deciding doesn't hold it.
+   */
+  get isWaiting(): boolean {
+    return this.waits.holdsTurn
+  }
+
+  /** Whether something is put to the person now, in any loop (a dialog is up for them): the scenes settle and show it. */
+  get isAwaitingPerson(): boolean {
+    return this.waits.anyAsked
   }
 
   /** The state changed (a turn started or ended, a question was asked): fade relights from full. */
@@ -111,6 +183,11 @@ export class Activity {
   }
 
   read(isSubagent = false): void {
+    this.add(isSubagent ? 0.25 : 0.5)
+  }
+
+  /** Any other tool (an MCP server's, one with no word of its own here): work of a size unknown, a small spark as a read is. */
+  usedTool(isSubagent = false): void {
     this.add(isSubagent ? 0.25 : 0.5)
   }
 
@@ -159,14 +236,15 @@ export class Activity {
     return this.runningAgents > 0 ? 1.2 * Math.log2(1 + this.runningAgents) : 0
   }
 
-  /** Levels from how long this turn has been going: one for every 30 s. */
+  /** Levels from how long this turn has been going: one for every 30 s (time spent waiting on the person aside). */
   get turnBoost(): number {
     return this.isTurnActive ? Math.floor((this.turnFrames * FRAME_MS) / TURN_STEP_MS) : 0
   }
 
   /** Advance `frames` frames (a slow tick covers several) of cooling. */
   tick(frames = 1): void {
-    if (this.isTurnActive) this.turnFrames += frames
+    this.roster.tick(frames * FRAME_MS)
+    if (this.isTurnActive && !this.isWaiting) this.turnFrames += frames
     this.sinceChangeMs = Math.min(FADE_MS, this.sinceChangeMs + frames * FRAME_MS)
     if (this.pendingChars > 0) {
       this.add(Math.min(STREAM_CAP * frames, this.pendingChars * STREAM_PER_CHAR))
@@ -183,12 +261,13 @@ export class Activity {
    * The dial for this frame. Idle: the idle floor (0 or 1) plus whatever is
    * still cooling. A turn: its effort floor + heat + the subagent boost + a
    * level for every 30 s it has run. Subagents alone (the turn over): from 1,
-   * + heat + their boost.
+   * + heat + their boost. Waiting on the person: no more than a calm 2.
    */
   strength(idleFloor: number): number {
-    if (!this.isWorking) return Math.max(0, Math.min(10, Math.round(idleFloor + this.heat)))
-    const base = this.isTurnActive ? this.floor : 1
-    return Math.max(1, Math.min(10, Math.round(base + this.heat + this.agentBoost) + this.turnBoost))
+    const s = this.isWorking
+      ? Math.max(1, Math.min(10, Math.round((this.isTurnActive ? this.floor : 1) + this.heat + this.agentBoost) + this.turnBoost))
+      : Math.max(0, Math.min(10, Math.round(idleFloor + this.heat)))
+    return this.isAwaitingPerson ? Math.min(s, WAIT_LEVEL) : s
   }
 
   /**
@@ -201,7 +280,8 @@ export class Activity {
     const base = this.isTurnActive ? this.floor : this.isWorking ? 1 : idleFloor
     const lit = base + this.fade * (10 - base) + this.heat + this.agentBoost
     const faded = Math.max(this.isWorking ? 1 : 0, Math.min(10, Math.round(lit)))
-    return this.isTurnActive ? Math.max(faded, this.strength(idleFloor)) : faded
+    const strength = this.isTurnActive ? Math.max(faded, this.strength(idleFloor)) : faded
+    return this.isAwaitingPerson ? Math.min(strength, WAIT_LEVEL) : strength
   }
 
   /** How much company subagents add (a wider fire, more boats, wingmen): 15 per running subagent. */

@@ -1,4 +1,4 @@
-// REVISION: flow-v119-no-tones
+// REVISION: flow-v185-clips
 //
 // Builds the soundscapes' clips into sounds/ (AAC, mono 22.05 kHz) and the
 // manifest hooks/sound-files.ts. Each recipe makes a WAV with sox (and Node,
@@ -9,21 +9,23 @@
 // crossfades at both ends, since Claude Code plays at most four clips at once.
 // Events are one-shots. Not part of the mod (Node): it needs sox and ffmpeg.
 //
-//   npm run sounds            every scene
-//   npm run sounds -- fire    just these folders
+//   npm run sounds                   every scene
+//   npm run sounds -- fire           just these folders
+//   npm run sounds -- events/chime   just these clips (the rest of their folder left as it is)
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { BED_EVERY_MS, BED_MS, BED_TAKES, type BedMood, LAYERS, layerGain, master, MOODS } from '../hooks/sound'
+import { BED_FADE_MS, BED_MS, BED_TAKES, type BedMood, LAYERS, layerGain, master, MOODS } from '../hooks/sound'
 import { makeScene } from '../hooks/styles'
+import { listClips } from './clips'
 
 const ROOT = join(import.meta.dirname, '..')
 const OUT = join(ROOT, 'sounds')
 const CACHE = join(ROOT, '.sound-cache')
 const RATE = 22050
 const LEN = BED_MS / 1000
-const XF = (BED_MS - BED_EVERY_MS) / 1000
+const XF = BED_FADE_MS / 1000
 /** The crossfade every bed clip ends with at both ends: equal power, for noise (the next clip is uncorrelated). */
 const BED = ['fade', 'q', `${XF}`, `${LEN}`, `${XF}`]
 /** Noise beds are made this much longer than a clip... */
@@ -365,6 +367,49 @@ function clunk(path: string, seed: number): void {
   wav(path, x)
 }
 
+/**
+ * The chime as Claude starts waiting on you: two tubes struck softly, one
+ * after the other, rising a fourth (E5 to A5: a question's lift, not an
+ * alarm's two-tone). Each rings at a hung tube's partials (1, 2.76 and 5.40
+ * times its pitch, the higher dying sooner), each partial a pair a fraction
+ * of a hertz apart, so it shimmers as struck metal does; a felt mallet's
+ * soft strike, no click. Each take strikes a little differently.
+ */
+function chime(path: string, seed: number): void {
+  const r = rng(seed)
+  const x = new Float32Array(Math.ceil(3 * RATE))
+  const notes = [
+    [0, 659.25, 0.78 + 0.08 * r()],
+    [0.17 + 0.05 * r(), 880, 0.95 + 0.05 * r()],
+  ] as const
+  // Each partial: its ratio to the pitch, level and ring (s).
+  const parts = [
+    [1, 1, 1.1],
+    [2.756, 0.3, 0.45],
+    [5.404, 0.08, 0.18],
+  ] as const
+  for (const [at, hz, amp] of notes) {
+    const i0 = Math.floor(at * RATE)
+    for (const [ratio, level, ring] of parts) {
+      const f = hz * ratio
+      const beat = 0.35 + 0.5 * r()
+      const tau = ring * (0.9 + 0.2 * r())
+      const p1 = r() * 2 * Math.PI
+      const p2 = r() * 2 * Math.PI
+      for (let i = 0; i0 + i < x.length; i++) {
+        const t = i / RATE
+        const env = Math.min(1, t / 0.005) * Math.exp(-t / tau)
+        if (env < 1e-4 && t > 0.01) break
+        x[i0 + i]! += amp * level * env * 0.5 * (Math.sin(2 * Math.PI * f * t + p1) + Math.sin(2 * Math.PI * (f + beat) * t + p2))
+      }
+    }
+  }
+  let max = 1e-6
+  for (const v of x) max = Math.max(max, Math.abs(v))
+  for (let i = 0; i < x.length; i++) x[i]! *= 0.9 / max
+  wav(path, x)
+}
+
 /** An N-wave (a sonic boom's pressure: a jump, a straight fall through zero, a jump back), `ms` long, at `at` s. */
 function nwave(x: Float32Array, at: number, ms: number, amp: number): void {
   const i0 = Math.floor(at * RATE)
@@ -372,7 +417,87 @@ function nwave(x: Float32Array, at: number, ms: number, amp: number): void {
   for (let i = 0; i < n && i0 + i < x.length; i++) x[i0 + i]! += amp * (1 - (2 * i) / n)
 }
 
+/**
+ * Computer banks chirping: about `per` a second, each a run of 1-4 short soft
+ * blips (a square-ish tone, 25-70 ms) on a few stepped pitches between `lo`
+ * and `hi` Hz, at random (never a rhythm).
+ */
+function chirps(path: string, seed: number, seconds: number, per: number, lo: number, hi: number): void {
+  const r = rng(seed)
+  const x = new Float32Array(Math.ceil(seconds * RATE))
+  const runs = Math.max(1, Math.round(per * seconds))
+  for (let j = 0; j < runs; j++) {
+    let at = r() * (seconds - 0.5)
+    const n = 1 + Math.floor(r() * 4)
+    const amp = 0.3 + 0.7 * r()
+    for (let k = 0; k < n; k++) {
+      const f = lo * Math.pow(hi / lo, Math.floor(r() * 6) / 5)
+      const len = 0.025 + 0.045 * r()
+      const i0 = Math.floor(at * RATE)
+      for (let i = 0; i < len * RATE && i0 + i < x.length; i++) {
+        const t = i / RATE
+        // Odd harmonics, a little: a soft square, eased in and out (no click).
+        const w = Math.sin(2 * Math.PI * f * t) + Math.sin(6 * Math.PI * f * t) / 4 + Math.sin(10 * Math.PI * f * t) / 9
+        x[i0 + i]! += w * Math.sin((Math.PI * i) / (len * RATE)) * amp * 0.3
+      }
+      at += len + 0.02 + 0.06 * r()
+    }
+  }
+  wav(path, x)
+}
+
+/**
+ * A gunshot, all noise: a crack blooming in under a millisecond, its
+ * low-pass closing from `open` Hz as it dies (`tau` s), with a body of lower
+ * noise under it; the room is added after.
+ */
+function gunshot(path: string, seed: number, seconds: number, open: number, tau: number, body: number): void {
+  const r = rng(seed)
+  const x = new Float32Array(Math.ceil(seconds * RATE))
+  const f = [0, 0]
+  const g = [0, 0]
+  for (let i = 0; i < x.length; i++) {
+    const t = i / RATE
+    const env = (1 - Math.exp(-t / 0.0006)) * Math.exp(-t / tau)
+    const hz = 300 + (open - 300) * Math.exp(-t / (tau * 0.6))
+    const k = 1 - Math.exp((-2 * Math.PI * hz) / RATE)
+    const kb = 1 - Math.exp((-2 * Math.PI * 380) / RATE)
+    const n = r() * 2 - 1
+    f[0]! += k * (n - f[0]!)
+    f[1]! += k * (f[0]! - f[1]!)
+    g[0]! += kb * (n - g[0]!)
+    g[1]! += kb * (g[0]! - g[1]!)
+    x[i] = (f[1]! + g[1]! * body * Math.exp(-t / (tau * 1.6))) * env
+  }
+  let max = 1e-6
+  for (const v of x) max = Math.max(max, Math.abs(v))
+  for (let i = 0; i < x.length; i++) x[i]! /= max
+  wav(path, x)
+}
+
+/**
+ * A zap (a plasma bolt): a buzzing tone sweeping down from `f0` to `f1` Hz
+ * over `len` s, its edge from a fast wobble, with a fizz of noise.
+ */
+function zap(path: string, seed: number, len: number, f0: number, f1: number): void {
+  const r = rng(seed)
+  const x = new Float32Array(Math.ceil((len + 0.05) * RATE))
+  let ph = 0
+  for (let i = 0; i < x.length; i++) {
+    const t = i / RATE
+    const k = Math.min(1, t / len)
+    const hz = f0 * Math.pow(f1 / f0, k)
+    ph += (2 * Math.PI * hz * (1 + 0.08 * Math.sin(2 * Math.PI * 61 * t))) / RATE
+    const env = Math.min(1, t / 0.002) * Math.exp(-t / (len * 0.45))
+    x[i] = (Math.tanh(2.5 * Math.sin(ph)) * 0.7 + (r() * 2 - 1) * 0.35) * env
+  }
+  wav(path, x)
+}
+
 type Tools = { v: number; tmp: (name: string) => string }
+
+/** How many shots a volley clip holds at a shot every `r` frames: about 1.4 s of fire (doom.ts says the same). */
+const volleyShots = (r: number) => Math.round(1400 / (r * 70))
 type Recipe = { variants?: number; make: (out: string, t: Tools) => void }
 
 /**
@@ -546,7 +671,7 @@ const RECIPES: Record<string, Record<string, Recipe>> = {
   avalon: {
     // A colony ship's interior, after spacecraft cabin noise (broadband, strongest
     // at 63-250 Hz, fans humming): the hull's beating hum, the air handlers, and
-    // the shield's electric fizz. Each rock on the shield is an event (events/zap).
+    // the shield's electric fizz. Each rock on the shield is an event (events/blast).
     hum: {
       variants: 3,
       make: (out, t) => {
@@ -605,7 +730,280 @@ const RECIPES: Record<string, Record<string, Recipe>> = {
       },
     },
   },
+  train: {
+    // A diesel-hauled train, matched to recordings of a train's wheels heard
+    // from a carriage (a rolling roar strongest at 250-500 Hz, falling away
+    // above 2 kHz), a freight train passing (the same roar from the lineside),
+    // a diesel locomotive idling (firing at ~30 Hz, its 3rd harmonic the
+    // strongest, over a broadband clatter as loud) and a diesel railcar pulling
+    // away (~95 Hz under load, brighter). The bed is the roll, the wind and the
+    // engine; the horn is an event.
+    rumble: {
+      variants: 3,
+      make: (out, t) => {
+        synth(t.tmp('r.wav'), 'synth', SLEN, 'pinknoise', 'lowpass', 1800, 'lowpass', 3000, 'highpass', 90, 'equalizer', 420, '1q', 4, 'bass', -3, 100)
+        synth(t.tmp('h.wav'), 'synth', SLEN, 'whitenoise', 'gain', -42, 'highpass', 2500, 'lowpass', 9000)
+        fx([t.tmp('r.wav'), t.tmp('h.wav')], t.tmp('m.wav'), 'gain', '-n', -3)
+        // The track's roughness swelling and easing at random (never in a rhythm).
+        turbulence(t.tmp('m.wav'), seedOf(out), [[0.31, 0.16], [1.3, 0.1], [4.1, 0.05]])
+        fx([t.tmp('m.wav')], out, 'reverb', 20, 'gain', '-n', -3, ...bedEnd(t))
+      },
+    },
+    rush: {
+      variants: 3,
+      make: (out, t) => {
+        // Air tearing past the carriages: a rush with a whistle wandering through it.
+        wander(t.tmp('w.wav'), seedOf(out), SLEN, 700, 2600, 0.5, 40)
+        synth(t.tmp('r.wav'), 'synth', SLEN, 'pinknoise', 'highpass', 500, 'lowpass', 5000, 'gain', -3)
+        turbulence(t.tmp('r.wav'), seedOf(out) + 1, [[0.45, 0.3], [1.9, 0.15]])
+        fx([t.tmp('w.wav'), t.tmp('r.wav')], t.tmp('m.wav'), 'gain', '-n', -3)
+        fx([t.tmp('m.wav')], out, 'reverb', 30, 'gain', '-n', -3, ...bedEnd(t))
+      },
+    },
+    air: {
+      variants: 3,
+      make: (out, t) => noiseBed(out, t, ['pinknoise', 'lowpass', 900, 'highpass', 80], [[0.23, 0.35], [0.9, 0.15]], ['reverb', 40], -6),
+    },
+    // The diesel: idling (~30 Hz), working (~62 Hz), flat out (~95 Hz). Its
+    // firing is a pitch, its harmonics exact multiples of it (any beat between
+    // them would throb), and over it the engine's broadband clatter.
+    ...Object.fromEntries(
+      (
+        [
+          [1, 30.5, 900, 0],
+          [2, 62, 1100, 1],
+          [3, 95, 1300, 2],
+        ] as const
+      ).map(([n, hz, clatter, bright]) => [
+        `drone${n}`,
+        {
+          variants: 3,
+          make: (out: string, t: Tools) => {
+            const k = [1, 2, 3, 4, 5, 6, 8, 10, 12]
+            const g = [0.15, 0.45, 0.6, 0.35, 0.3, 0.22, 0.14, 0.1, 0.06]
+            hum(t.tmp('h.wav'), seedOf(out), SLEN, k.filter(m => m * hz < 2000).map((m, i) => [m * hz, g[i]!] as const), 40)
+            fx([t.tmp('h.wav')], t.tmp('ho.wav'), 'overdrive', 6, 'gain', -12)
+            synth(t.tmp('n.wav'), 'synth', SLEN, 'pinknoise', 'gain', -6 + 1.5 * bright, 'highpass', 180, 'lowpass', 4000 + 600 * bright, 'equalizer', clatter, '1q', 3 + bright)
+            turbulence(t.tmp('n.wav'), seedOf(out) + 1, [[0.4, 0.1], [2.1, 0.06]])
+            fx([t.tmp('ho.wav'), t.tmp('n.wav')], out, 'reverb', 20, 'gain', '-n', -3, ...bedEnd(t, false))
+          },
+        },
+      ]),
+    ),
+  },
+  earthrise: {
+    // Designed, as the warp drive and the colony ship are (no real counterpart).
+    // There's no air on the moon, so no noise, wind or swells: only steady tones,
+    // all low (nothing whistling or glinting), in one key (A): a deep drone (its
+    // pitch carried by harmonics a laptop plays), its fifth, and a major chord
+    // above them filling in with the work.
+    drone: {
+      variants: 3,
+      make: (out, t) => {
+        hum(t.tmp('h.wav'), seedOf(out), SLEN, [[55, 0.25], [110, 0.35], [165, 0.3], [220, 0.22], [330, 0.1]], 220)
+        fx([t.tmp('h.wav')], out, 'reverb', 70, 50, 100, 'gain', '-n', -3, ...bedEnd(t, false))
+      },
+    },
+    fifth: {
+      variants: 3,
+      make: (out, t) => {
+        hum(t.tmp('h.wav'), seedOf(out), SLEN, [[82.5, 0.2], [165, 0.3], [247.5, 0.25], [330, 0.12]], 300)
+        fx([t.tmp('h.wav')], out, 'reverb', 70, 50, 100, 'gain', '-n', -3, ...bedEnd(t, false))
+      },
+    },
+    chord: {
+      variants: 3,
+      make: (out, t) => {
+        hum(t.tmp('h.wav'), seedOf(out), SLEN, [[220, 0.3], [277.5, 0.25], [330, 0.25], [440, 0.1]], 400)
+        fx([t.tmp('h.wav')], out, 'lowpass', 1000, 'reverb', 80, 50, 100, 'gain', '-n', -3, ...bedEnd(t, false))
+      },
+    },
+  },
+  doom: {
+    // A techbase, designed (generic, none of the game's own sounds): the machinery's
+    // hum and the air handlers (after a plant room: strongest at 63-250 Hz), computer
+    // banks chirping, nukage bubbling in the floor, and the fighting farther off.
+    hum: {
+      variants: 3,
+      make: (out, t) => {
+        hum(t.tmp('h.wav'), seedOf(out), SLEN, [[60, 0.3], [120, 0.4], [180, 0.3], [240, 0.18], [360, 0.08], [480, 0.04]], 180)
+        fx([t.tmp('h.wav')], out, 'overdrive', 4, 'reverb', 45, 50, 80, 'gain', '-n', -3, ...bedEnd(t, false))
+      },
+    },
+    air: { variants: 3, make: (out, t) => noiseBed(out, t, ['pinknoise', 'lowpass', 1400, 'highpass', 80, 'bass', '+3', 140], [[0.27, 0.12], [1.3, 0.06]], ['reverb', 40]) },
+    computers: {
+      variants: 3,
+      make: (out, t) => {
+        chirps(t.tmp('c.wav'), t.v + 170, SLEN, 0.7, 700, 2400)
+        fx([t.tmp('c.wav')], out, 'reverb', 50, 50, 70, 'gain', '-n', -4, ...bedEnd(t, false))
+      },
+    },
+    nukage: {
+      variants: 3,
+      make: (out, t) => {
+        blips(t.tmp('b.wav'), t.v + 180, SLEN, 3, 140, 420, 5)
+        fx([t.tmp('b.wav')], out, 'lowpass', 1100, 'reverb', 40, 'gain', '-n', -4, ...bedEnd(t, false))
+      },
+    },
+    rumble: {
+      variants: 3,
+      make: (out, t) => {
+        // Distant fighting: deep thumps at random under a low roar, all through the walls.
+        impulses(t.tmp('i.wav'), t.v + 190, SLEN, 3, [600, 2400], 0.6)
+        synth(t.tmp('n.wav'), 'synth', SLEN, 'brownnoise', 'lowpass', 300, 'gain', -10)
+        turbulence(t.tmp('n.wav'), seedOf(out), [[0.4, 0.4], [1.7, 0.2]])
+        fx([t.tmp('i.wav'), t.tmp('n.wav')], out, 'lowpass', 500, 'bass', '+4', 110, 'reverb', 60, 50, 100, 'gain', '-n', -3, ...bedEnd(t, false))
+      },
+    },
+  },
   events: {
+    pistol: {
+      // A sharp crack with a little body, in a hard steel corridor.
+      variants: 3,
+      make: (out, t) => {
+        gunshot(t.tmp('g.wav'), 300 + t.v * 13, 0.5, 6000 + 600 * t.v, 0.035, 0.6)
+        fx([t.tmp('g.wav')], out, 'highpass', 160, 'reverb', 35, 60, 60, 'gain', '-n', -2)
+      },
+    },
+    chaingun: {
+      // Shorter and punchier than the pistol, its tail short (the next is right behind).
+      variants: 3,
+      make: (out, t) => {
+        gunshot(t.tmp('g.wav'), 310 + t.v * 17, 0.3, 5000 + 700 * t.v, 0.022, 0.9)
+        fx([t.tmp('g.wav')], out, 'highpass', 140, 'overdrive', 6, 'reverb', 20, 60, 40, 'gain', '-n', -2)
+      },
+    },
+    shotgun: {
+      // A heavy boom, then the pump racked: back, forward.
+      variants: 3,
+      make: (out, t) => {
+        explosion(t.tmp('x.wav'), 320 + t.v * 19, 0.7, 4200 + 400 * t.v)
+        const rack = (name: string, at: number, hz: number) => {
+          synth(t.tmp(name), 'synth', 0.05, 'whitenoise', 'bandpass', hz, hz * 0.6, 'fade', 'q', 0.001, 0.05, 0.04, 'gain', -10, 'pad', at, 0)
+          return t.tmp(name)
+        }
+        const a = rack('a.wav', 0.42 + 0.03 * t.v, 2600)
+        const b = rack('b.wav', 0.56 + 0.03 * t.v, 1900)
+        fx([t.tmp('x.wav'), a, b], out, 'highpass', 90, 'overdrive', 8, 'reverb', 40, 60, 70, 'gain', '-n', -2)
+      },
+    },
+    plasma: {
+      // A bolt leaving the rifle: a buzzing zap falling in pitch (generic sci-fi).
+      variants: 3,
+      make: (out, t) => {
+        zap(t.tmp('z.wav'), 330 + t.v, 0.16 + 0.02 * t.v, 2400 + 300 * t.v, 380)
+        fx([t.tmp('z.wav')], out, 'highpass', 200, 'lowpass', 7000, 'reverb', 30, 50, 50, 'gain', '-n', -3)
+      },
+    },
+    // A fast gun heard a volley at a time, one clip for VOLLEY_SHOTS of its shots at its rate (frames of 70 ms):
+    // a clip a shot would fill the player's four places (each held for its length and afplay's drain) and cut
+    // each other off unheard. Each shot its own take.
+    ...Object.fromEntries(
+      ([['rattle', 3], ['rattle', 4], ['rattle', 5], ['bolts', 2], ['bolts', 3]] as const).map(([name, r]) => [
+        `${name}${r}-`,
+        {
+          variants: 2,
+          make: (out: string, t: Tools) => {
+            const n = volleyShots(r)
+            const parts = Array.from({ length: n }, (_, i) => {
+              const seed = 340 + 31 * t.v + 7 * i + 100 * r
+              if (name === 'rattle') {
+                gunshot(t.tmp('g.wav'), seed, 0.3, 5000 + 700 * ((i + t.v) % 3), 0.022, 0.9)
+                fx([t.tmp('g.wav')], t.tmp(`s${i}.wav`), 'highpass', 140, 'overdrive', 6, 'gain', -1 + 0.6 * ((i * 7) % 3) / 2, 'pad', ((i * r * 70) / 1000).toFixed(3), 0)
+              } else {
+                zap(t.tmp('z.wav'), seed, 0.16 + 0.02 * ((i + t.v) % 3), 2400 + 300 * ((i + t.v) % 3), 380)
+                fx([t.tmp('z.wav')], t.tmp(`s${i}.wav`), 'highpass', 200, 'lowpass', 7000, 'pad', ((i * r * 70) / 1000).toFixed(3), 0)
+              }
+              return t.tmp(`s${i}.wav`)
+            })
+            fx(parts, out, ...(name === 'rattle' ? ['reverb', 20, 60, 40] : ['reverb', 30, 50, 50]), 'gain', '-n', name === 'rattle' ? -2 : -3)
+          },
+        },
+      ]),
+    ),
+    splat: {
+      // Something going down: a wet thump and a squelch.
+      variants: 3,
+      make: (out, t) => {
+        synth(t.tmp('k.wav'), 'synth', 0.35, 'sine', `${120 + 10 * t.v}-60`, 'fade', 'q', 0.003, 0.35, 0.3)
+        synth(t.tmp('n.wav'), 'synth', 0.3, 'pinknoise', 'bandpass', 700, 900)
+        turbulence(t.tmp('n.wav'), seedOf(out), [[38, 0.7], [12, 0.4]])
+        fx([t.tmp('n.wav')], t.tmp('n2.wav'), 'fade', 'q', 0.005, 0.3, 0.25, 'gain', -4)
+        fx([t.tmp('k.wav'), t.tmp('n2.wav')], out, 'reverb', 30, 60, 50, 'gain', '-n', -3)
+      },
+    },
+    fireball: {
+      // A fireball thrown: a roaring whoosh, crackling.
+      variants: 3,
+      make: (out, t) => {
+        synth(t.tmp('n.wav'), 'synth', 0.8, 'brownnoise', 'synth', 0.8, 'pinknoise', 'mix', 'bandpass', 600 + 100 * t.v, 700)
+        turbulence(t.tmp('n.wav'), seedOf(out), [[14, 0.35], [4, 0.25]])
+        impulses(t.tmp('i.wav'), t.v + 200, 0.8, 30, [20, 80], 0.8)
+        fx([t.tmp('i.wav')], t.tmp('i2.wav'), 'highpass', 1500, 'gain', -8)
+        fx([t.tmp('n.wav'), t.tmp('i2.wav')], out, 'fade', 'q', 0.12, 0.8, 0.5, 'reverb', 40, 'gain', '-n', -3)
+      },
+    },
+    door: {
+      // A heavy door rising: a motor's grind and the slab scraping up, a clunk as it stops (short: in the tall
+      // view a door comes every few seconds, and a clip holds a place in the player for its length).
+      make: (out, t) => {
+        hum(t.tmp('m.wav'), 210, 0.9, [[90, 0.4], [180, 0.35], [270, 0.2], [360, 0.1]], 40)
+        synth(t.tmp('s.wav'), 'synth', 0.9, 'brownnoise', 'synth', 0.9, 'pinknoise', 'mix', 'lowpass', 1200, 'highpass', 90, 'gain', -6)
+        turbulence(t.tmp('s.wav'), 211, [[7, 0.3], [2, 0.2]])
+        fx([t.tmp('m.wav'), t.tmp('s.wav')], t.tmp('ms.wav'), 'fade', 'q', 0.1, 0.9, 0.15, 'gain', -4)
+        clunk(t.tmp('c.wav'), 212)
+        fx([t.tmp('c.wav')], t.tmp('c2.wav'), 'gain', -6, 'pad', 0.78, 0)
+        fx([t.tmp('ms.wav'), t.tmp('c2.wav')], out, 'reverb', 35, 60, 60, 'gain', '-n', -3)
+      },
+    },
+    reload: {
+      // A gun changed: two clacks of steel.
+      make: (out, t) => {
+        clunk(t.tmp('a.wav'), 220)
+        clunk(t.tmp('b.wav'), 221)
+        fx([t.tmp('a.wav')], t.tmp('a2.wav'), 'highpass', 900, 'trim', 0, 0.25)
+        fx([t.tmp('b.wav')], t.tmp('b2.wav'), 'highpass', 1200, 'trim', 0, 0.25, 'pad', 0.3, 0)
+        fx([t.tmp('a2.wav'), t.tmp('b2.wav')], out, 'reverb', 25, 60, 40, 'gain', '-n', -3)
+      },
+    },
+    teleport: {
+      // A marine teleporting out: a shimmering sweep rising, glittering, fading (generic sci-fi).
+      make: (out, t) => {
+        wander(t.tmp('w.wav'), 230, 1.6, 600, 3800, 6, 25)
+        synth(t.tmp('r.wav'), 'synth', 1.6, 'sine', '300-1800', 'gain', -16)
+        glints(t.tmp('g.wav'), 231, 1.6, 30)
+        fx([t.tmp('w.wav'), t.tmp('r.wav'), t.tmp('g.wav')], out, 'fade', 'q', 0.25, 1.6, 0.9, 'reverb', 70, 50, 100, 'gain', '-n', -3)
+      },
+    },
+    streak: {
+      // A shooting star: a soft low tone, struck and fading (no air on the moon to whoosh through).
+      variants: 3,
+      make: (out, t) => {
+        hum(t.tmp('h.wav'), 240 + t.v, 1.2, [[220, 0.3], [330, 0.25], [440, 0.1]], 300)
+        fx([t.tmp('h.wav')], out, 'lowpass', 1000, 'fade', 'q', 0.03, 1.2, 1, 'reverb', 60, 50, 100, 'gain', '-n', -4)
+      },
+    },
+    comet: {
+      // A comet: a long, low chord swelling in as it comes into the sky.
+      make: (out, t) => {
+        hum(t.tmp('h.wav'), 250, 6.5, [[110, 0.3], [165, 0.28], [220, 0.22], [277.5, 0.15]], 300)
+        fx([t.tmp('h.wav')], out, 'fade', 'q', 2.5, 6.5, 3.5, 'reverb', 80, 50, 100, 'gain', '-n', -4)
+      },
+    },
+    horn: {
+      // A diesel's two-tone horn, high then low: each reed a steady pitch that's
+      // never pure (narrow resonances on noise, see hum) with its overtones,
+      // overdriven brassy, out in the open. Three takes, held for longer or shorter.
+      variants: 3,
+      make: (out, t) => {
+        const [a, b] = ([[0.42, 0.62], [0.32, 0.5], [0.55, 0.85]] as const)[t.v - 1]!
+        hum(t.tmp('h.wav'), seedOf(out), a + 0.2, [[466, 0.55], [932, 0.45], [1398, 0.28], [1864, 0.14]], 400)
+        hum(t.tmp('l.wav'), seedOf(out) + 1, b + 0.2, [[370, 0.55], [740, 0.45], [1110, 0.28], [1480, 0.14]], 400)
+        fx([t.tmp('h.wav')], t.tmp('h2.wav'), 'trim', 0, a, 'fade', 'q', 0.03, a, 0.05)
+        fx([t.tmp('l.wav')], t.tmp('l2.wav'), 'trim', 0, b, 'fade', 'q', 0.02, b, 0.14, 'pad', a + 0.03, 0)
+        fx([t.tmp('h2.wav'), t.tmp('l2.wav')], out, 'overdrive', 14, 'highpass', 220, 'lowpass', 5000, 'reverb', 45, 50, 70, 'gain', '-n', -2)
+      },
+    },
     blast: {
       // A rock blowing up on the shield, heard through the hull: raw noise, no
       // tone (see explosion), overdriven for grit but not squeezed (its punch
@@ -725,6 +1123,14 @@ const RECIPES: Record<string, Record<string, Recipe>> = {
         fx([t.tmp('c.wav')], out, 'reverb', 45, 90, 80, 'gain', '-n', -3)
       },
     },
+    chime: {
+      // Claude waiting on you: two soft struck tubes rising a fourth (see chime), in a little room, dying away.
+      variants: 3,
+      make: (out, t) => {
+        chime(t.tmp('c.wav'), 230 + t.v * 41)
+        fx([t.tmp('c.wav')], out, 'highpass', 180, 'reverb', 35, 60, 70, 'fade', 'q', 0.003, 3, 0.9, 'gain', '-n', -3)
+      },
+    },
   },
 }
 
@@ -734,15 +1140,20 @@ if (full) rmSync(OUT, { recursive: true, force: true })
 mkdirSync(OUT, { recursive: true })
 mkdirSync(CACHE, { recursive: true })
 for (const [folder, clips] of Object.entries(RECIPES)) {
-  if (!full && !only.includes(folder)) continue
+  // A folder, or just some of its clips (`events/chime`: sox's dither makes every rebuild differ, so the rest stay as they are).
+  const picked = only.filter(o => o.startsWith(`${folder}/`)).map(o => o.slice(folder.length + 1))
+  if (!full && !only.includes(folder) && !picked.length) continue
+  const some = !full && !only.includes(folder)
   // Events ship as they are; bed layers only go into the cache, to be mixed.
   const ships = folder === 'events'
-  if (ships) {
+  if (ships && !some) {
     rmSync(join(OUT, folder), { recursive: true, force: true })
     mkdirSync(join(OUT, folder), { recursive: true })
   }
+  if (ships) mkdirSync(join(OUT, folder), { recursive: true })
   mkdirSync(join(CACHE, folder), { recursive: true })
   for (const [name, recipe] of Object.entries(clips)) {
+    if (some && !picked.includes(name)) continue
     // (Every bed layer has BED_TAKES takes; an event, its recipe's variants.)
     const n = ships ? recipe.variants ?? 1 : BED_TAKES
     const made: string[] = []
@@ -881,12 +1292,10 @@ for (const scene of Object.keys(LAYERS)) {
 writeFileSync(gainsFile, JSON.stringify(gains, null, 1))
 
 // The manifest: every clip there is, and each mood's gain.
-const files = readdirSync(OUT)
-  .flatMap(folder => readdirSync(join(OUT, folder)).map(f => `sounds/${folder}/${f}`))
-  .sort()
+const files = listClips(OUT)
 const sorted = Object.keys(gains).sort()
 writeFileSync(
   join(ROOT, 'hooks', 'sound-files.ts'),
-  `// REVISION: flow-v106-sound-moods\n//\n// Written by scripts/make-sounds.ts: every clip in sounds/, and the gain that\n// puts each mood's mixed bed back to its layers' level (0: silent). Don't edit.\n\nexport const SOUND_FILES: readonly string[] = [\n${files.map(f => `  '${f}',`).join('\n')}\n]\n\nexport const BED_GAINS: Readonly<Record<string, number>> = {\n${sorted.map(k => `  '${k}': ${gains[k]},`).join('\n')}\n}\n`,
+  `// REVISION: flow-v125-chime\n//\n// Written by scripts/make-sounds.ts: every clip in sounds/, and the gain that\n// puts each mood's mixed bed back to its layers' level (0: silent). Don't edit.\n\nexport const SOUND_FILES: readonly string[] = [\n${files.map(f => `  '${f}',`).join('\n')}\n]\n\nexport const BED_GAINS: Readonly<Record<string, number>> = {\n${sorted.map(k => `  '${k}': ${gains[k]},`).join('\n')}\n}\n`,
 )
 console.log(`hooks/sound-files.ts: ${files.length} clips, ${sorted.length} moods`)

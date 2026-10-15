@@ -1,4 +1,4 @@
-// REVISION: flow-v106-hue
+// REVISION: flow-v186-upstream-merge
 //
 // Engine (the `engine` style): a Victorian steam engine room on the same dials
 // as the fire; the level is how hard it is being driven. At 1 it stands cold,
@@ -23,17 +23,25 @@
 // (2×2 a cell, rendered as quadrant blocks with a fg and bg color) and the
 // moving parts on a braille dot grid (2×4 a cell, the same x resolution).
 // Steam is a density field at dot resolution, drawn as dithered braille.
-// Subagents (the coverage boost) light lamps along the bed plate and thicken
-// the steam; smoke makes the engine sputter, the chimney pour sooty black
-// smoke (even cold) and the lamps burn low; a nearly-full context turns the
+// Subagents thicken the steam (the coverage boost), and each lights a group
+// of lamps of its own along the bed plate (crew.ts): they warm up as its agent
+// starts, a light runs along them while it works, they glow low while it's
+// quiet and flash together while it waits on you, and fade out when it's done
+// (red, if it failed). Smoke makes the engine sputter, the chimney pour sooty
+// black smoke (even cold) and the lamps burn low; a nearly-full context turns the
 // firebox to a blue gas flame, the steam and gauges blue-white, and blinks a
-// blue lamp on the boiler.
+// blue lamp on the boiler. While Claude waits on the person the engine runs
+// down to a stop with steam up, the safety valve lifting with each slow
+// breath, the whole room breathing in sepia (waiting.ts).
 
-import { Cells, DEFAULT_COLOR, Rng, isTall } from './cells'
+import type { AgentDial } from './agents'
+import { Cells, DEFAULT_COLOR, freshSeed, Rng, isTall } from './cells'
+import { beckon, Crew, failed, type AgentMark } from './crew'
 import type { Tint } from './styles'
-import { BRAILLE, clamp01, dist, mix, QUAD } from './pixels'
+import { BRAILLE, clamp01, dist, mix, QUAD, rampAt } from './pixels'
 import { defineScene } from './scene-def'
 import { hear, type SoundEvent } from './sound'
+import { breath, easeWait, waitTone } from './waiting'
 
 /** Crank radians per frame at each level (0 = off, 1 = cold and still). */
 const SPEED = [0, 0, 0.035, 0.07, 0.11, 0.15, 0.2, 0.27, 0.36, 0.47, 0.6]
@@ -59,6 +67,7 @@ const C = {
   needle: 0x2b211a,
   needleHot: 0xc0301c,
   lampOn: 0xffb43a,
+  lampFail: 0xff4a2a,
   lampLow: 0x6a4818,
   lampBlue: 0x8cc4ff,
   blue: 0x3c8cff,
@@ -111,20 +120,27 @@ type Emitter = { x: number; y: number; kind: number }
 
 const frac = (n: number) => n - Math.floor(n)
 
-function fireColor(h: number, ramp: readonly number[] = FIRE): number {
-  const x = clamp01(h) * (ramp.length - 1)
-  const i = Math.min(ramp.length - 2, Math.floor(x))
-  return mix(ramp[i]!, ramp[i + 1]!, x - i)
-}
+const fireColor = (h: number, ramp: readonly number[] = FIRE) => rampAt(ramp, h)
 
 /** Solid colors are stored +1 so 0 can mean "empty" (and pure black still works). */
 const SOLID = 0x1000000
 
+/** Lamp groups along the bed plate, one a subagent: the band's (three lamps each), the spine's (one each). */
+const LAMP_GROUPS = 6
+const LAMP_GROUPS_TALL = 3
+
 export class Engine {
   strength = 8
   coverageBoost = 0
+  /** The subagents, one by one: each lights a group of lamps on the bed plate. */
+  agents: readonly AgentDial[] = []
+  private crew = new Crew(LAMP_GROUPS)
   sounds: SoundEvent[] = []
   tint: Tint = 'normal'
+  /** Claude waits on the person: the engine runs down and stands, steam up. */
+  waiting = false
+  /** How far into the wait's look (0..1), eased. */
+  private kWait = 0
   private columns = 0
   private rows = 0
   private out = new Cells(0, 0)
@@ -214,8 +230,8 @@ export class Engine {
   private boilerTop = 0
   private boilerBottom = 0
 
-  constructor(seed?: number) {
-    this.seed = (seed ?? Date.now()) >>> 0
+  constructor(seed = freshSeed()) {
+    this.seed = seed >>> 0
     this.rng = new Rng(seed)
   }
 
@@ -422,13 +438,13 @@ export class Engine {
     // Then pack idler gears into whatever room is left, each meshing with
     // exactly one gear already placed (and clear of all the others).
     const colors = [C.brass, C.copper, C.ironLt, C.brassHi]
-    for (let pass = 0; pass < 4; pass++) {
+    for (let round = 0; round < 4; round++) {
       const count = this.gears.length
       let added = 0
       for (let i = 0; i < count; i++) {
         const o = this.gears[i]!
         for (let k = 0; k < 16; k++) {
-          const ang = (k / 16) * TAU + pass * 0.2
+          const ang = (k / 16) * TAU + round * 0.2
           for (let n = 10; n >= 6; n--) {
             const r = n * PITCH
             const dist = o.r + r + 0.5
@@ -627,12 +643,17 @@ export class Engine {
 
   step(): void {
     this.t++
+    this.crew.room = this.lampRoom()
+    this.crew.update(this.agents, this.coverageBoost)
     const level = Math.max(0, Math.min(10, Math.round(this.strength)))
     const smoke = this.tint === 'smoke'
+    const was = breath(this.t - 1)
+    this.kWait = easeWait(this.kWait, this.waiting)
     // A failed command makes the engine sputter: its target speed stumbles.
     if (smoke && this.rng.f() < 0.04) this.sputter = 6 + this.rng.f() * 10
     if (this.sputter > 0) this.sputter--
-    const target = SPEED[level]! * (this.sputter > 0 ? 0.45 : 1)
+    // Waiting on the person, it runs down to a stop.
+    const target = SPEED[level]! * (this.sputter > 0 ? 0.45 : 1) * (1 - this.kWait)
     this.omega += (target - this.omega) * 0.045
     if (Math.abs(target - this.omega) < 0.0005) this.omega = target
     this.angle += this.omega
@@ -660,6 +681,8 @@ export class Engine {
     if (smoke && level > 0 && this.rng.f() < 0.3) this.puff(this.chimX, this.chimY, 0.75 + this.rng.f() * 0.3, 1.5 + level * 0.08, Math.max(2, level))
     // Cold, the safety valve lets a faint wisp go now and then.
     if (level > 0 && level <= 3 && this.rng.f() < (level === 1 ? 0.06 : 0.03)) this.wisp(this.valveX, this.valveY)
+    // Standing for the person, steam up: the valve lifts as each breath comes in.
+    if (level > 0 && this.kWait > 0.5 && was < 0.6 && breath(this.t) >= 0.6) for (let k = 0; k < 3; k++) this.wisp(this.valveX, this.valveY)
     if (level >= 7 && this.rng.f() < (level - 6) * 0.15 && !smoke) this.chimneySpark(level)
     // Smokestacks and leaky valves.
     for (let i = 1; i < this.emitters.length; i++) {
@@ -885,6 +908,7 @@ export class Engine {
     this.drawSparks()
     this.compose()
     for (let i = 0; i < this.gauges.length; i++) this.drawGauge(this.gauges[i]!)
+    waitTone(out, this.kWait, this.t)
     return out
   }
 
@@ -1440,25 +1464,58 @@ export class Engine {
     }
   }
 
-  /** The bed plate along the floor, with a lamp lit for each bit of subagent load. */
+  /** The bed plate's run (quadrant pixels): beside the flywheel in the band, the whole floor in the spine. */
+  private bedSpan(): [x0: number, x1: number] {
+    const x1 = this.columns * 2 - 1
+    return [this.vertical ? 0 : Math.ceil(this.cx + this.radius) + 1, x1]
+  }
+
+  /** How many lamp groups this layout's bed plate has room for (each group three lamps in the band, one in the spine). */
+  private lampRoom(): number {
+    const [x0, x1] = this.bedSpan()
+    const lamps = this.vertical ? 1 : 3
+    return Math.max(0, Math.min(this.vertical ? LAMP_GROUPS_TALL : LAMP_GROUPS, Math.floor((x1 - x0) / (lamps * 4)) - 1))
+  }
+
+  /**
+   * The bed plate along the floor, and on it a group of lamps for each
+   * subagent, in its slot's place: three in the band, one in the spine.
+   */
   private drawBed(): void {
-    const wd = this.columns * 2
     const qy = this.rows * 2 - 1
-    let x0 = 0
-    let x1 = wd - 1
-    if (!this.vertical) x0 = Math.ceil(this.cx + this.radius) + 1
+    const [x0, x1] = this.bedSpan()
     this.qrect(x0, qy, x1, qy, C.ironDk)
-    const lit = Math.min(this.vertical ? 4 : 16, Math.round(this.coverageBoost / (this.vertical ? 12 : 4)))
-    if (lit <= 0) return
-    const step = Math.max(4, Math.floor((x1 - x0) / (lit + 1)) & ~1)
-    for (let k = 0; k < lit; k++) {
-      const x = ((x0 + step * (k + 1)) & ~1) - (this.vertical ? 0 : 0)
-      if (x + 1 > x1) break
-      const blink = ((this.t >> 3) + k * 5) % 13 === 0
-      const on = this.tint === 'smoke' ? C.lampLow : this.tint === 'blue' ? C.lampBlue : C.lampOn
-      this.q(x, qy, blink ? C.brassDk : on)
-      this.q(x + 1, qy, blink ? C.brassDk : on)
+    this.crew.clearMarks()
+    const groups = this.lampRoom()
+    const lamps = this.vertical ? 1 : 3
+    if (groups <= 0) return
+    const step = (x1 - x0) / (groups + 1)
+    const on = this.tint === 'smoke' ? C.lampLow : this.tint === 'blue' ? C.lampBlue : C.lampOn
+    for (const m of this.crew.mates) {
+      if (m.slot >= groups) continue
+      const mid = (Math.round(x0 + step * (m.slot + 1)) & ~1) - (lamps - 1) * 2
+      for (let k = 0; k < lamps; k++) {
+        // How lit (0 dark .. 1 full), in a few steps: warming up as it arrives, a light running along the
+        // group while its agent works, a low glow while it's quiet, all flashing while it waits on you.
+        let lit: number
+        if (m.leaving) lit = m.here
+        else if (m.waiting) lit = beckon(m, this.t) ? 1 : 0.15
+        else {
+          const run = lamps === 1 ? ((this.t >> 1) + m.slot) % 4 !== 0 : ((this.t >> 2) + m.slot) % lamps === k
+          lit = m.here * (0.35 + 0.65 * m.busy * (run ? 1 : 0.45))
+        }
+        const color = failed(m) ? C.lampFail : on
+        const x = mid + k * 4
+        const c = mix(C.brassDk, color, Math.round(lit * 4) / 4)
+        this.q(x, qy, c)
+        this.q(x + 1, qy, c)
+      }
+      this.crew.mark(m, mid / 2 - 1, this.rows - 2, lamps * 2 + 1, 2, this.columns, this.rows)
     }
+  }
+
+  agentMarks(): readonly AgentMark[] {
+    return this.strength > 0 ? this.crew.marks : []
   }
 
   private drawSteam(): void {

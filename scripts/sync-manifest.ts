@@ -1,4 +1,4 @@
-// REVISION: flow-v82-random-colors
+// REVISION: flow-v186-upstream-merge
 //
 // Writes the scene list into .claude-plugin/plugin.json from SCENES
 // (hooks/styles.ts): the `style` options (and `random`) and description, the

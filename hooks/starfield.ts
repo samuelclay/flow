@@ -1,4 +1,4 @@
-// REVISION: flow-v83-hue
+// REVISION: flow-v186-upstream-merge
 //
 // Warp (the `warp` style): a starfield on the same dials as the fire, the
 // level is the ship's speed.
@@ -7,13 +7,16 @@
 // braille sub-pixel grid (2×4 dots a cell). At rest the field drifts and
 // twinkles; from level 6 every star draws a streak back along its path, so
 // by 10 the band is hyperspace. Subagents (the coverage boost) add stars;
-// smoke dims the field to gray, a nearly-full context tints it cyan.
+// smoke dims the field to gray, a nearly-full context turns it deep blue. While
+// Claude waits on the person the ship drops out of warp: the stars slow to a
+// stop and hold, breathing in sepia (waiting.ts).
 
 import { Cells, Rng } from './cells'
 import { BRAILLE } from './pixels'
 import { params } from './fire'
 import type { Tint } from './styles'
 import { defineScene } from './scene-def'
+import { easeWait, waitTone } from './waiting'
 
 /** Depth travelled per frame at each level (0 = stopped). */
 const SPEED = [0, 0.0025, 0.004, 0.006, 0.009, 0.013, 0.018, 0.025, 0.034, 0.046, 0.062]
@@ -35,8 +38,12 @@ function starColor(b: number, tint: Tint, warp: number): number {
   let g = 80 + v * 175
   let bl = 120 + v * 135
   if (tint === 'blue') {
-    r *= 0.55
-    g = Math.min(255, g * 1.05)
+    // Deep blue, not cyan: cyan parts from white only in its red, which
+    // red-green colour blindness can't see. This loses green and light too,
+    // and stays darker than smoke's gray (luminance alone tells them apart).
+    r = 12 + v * 30
+    g = 32 + v * 74
+    bl = 140 + v * 100
   }
   r -= warp * 40 * (1 - v)
   g -= warp * 15 * (1 - v)
@@ -48,6 +55,10 @@ export class Starfield {
   strength = 8
   coverageBoost = 0
   tint: Tint = 'normal'
+  /** Claude waits on the person: the stars slow to a stop. */
+  waiting = false
+  /** How far it has stopped (0..1), eased. */
+  private kWait = 0
   private columns = 0
   private rows = 0
   private stars: Star[] = []
@@ -113,10 +124,13 @@ export class Starfield {
 
   step(): void {
     this.t++
+    this.kWait = easeWait(this.kWait, this.waiting)
     const want = this.wanted()
     while (this.stars.length < want) this.stars.push(this.spawn(true))
-    if (this.stars.length > want) this.stars.length = want
-    const speed = SPEED[Math.max(0, Math.min(10, this.strength))]!
+    // Fewer wanted: they go a few a frame, not all at once (none while it holds for the person); off is off at once.
+    if (want === 0) this.stars.length = 0
+    else if (this.stars.length > want && this.kWait === 0) this.stars.length = Math.max(want, this.stars.length - 2)
+    const speed = SPEED[Math.max(0, Math.min(10, this.strength))]! * (1 - this.kWait)
     for (let i = 0; i < this.stars.length; i++) {
       const s = this.stars[i]!
       s.z -= speed
@@ -144,9 +158,10 @@ export class Starfield {
     for (const s of this.stars) {
       const head = this.project(s, s.z)
       if (!head) continue
-      // Nearer is brighter; at rest the field twinkles.
+      // Nearer is brighter; at rest the field twinkles; holding for the person, every star shows.
       const twinkle = level <= 2 ? 0.75 + 0.25 * Math.sin(this.t * 0.35 + s.tw) : 1
-      const b = (1 - s.z) * twinkle
+      const near = 1 - s.z
+      const b = (near + (1 - near) * 0.6 * this.kWait) * twinkle
       this.plot(head[0], head[1], b)
       if (trail > 0) {
         // A streak back along the star's path, fading toward its tail.
@@ -165,6 +180,7 @@ export class Starfield {
       if (bits[i] === 0) out.blank(i)
       else out.set(i, 0x2800 | bits[i]!, starColor(bright[i]!, this.tint, warp))
     }
+    waitTone(out, this.kWait, this.t)
     return out
   }
 

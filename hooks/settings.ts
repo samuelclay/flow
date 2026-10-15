@@ -1,10 +1,15 @@
-// REVISION: flow-v106-fade-random-color
+// REVISION: flow-v186-upstream-merge
 //
 // Flow's settings and the `/flow` command's grammar, shared by every harness adapter (Claude Code's
 // register.tsx, pi's pi/index.ts). Pure: no engine imports. Replies carry no
 // `flow:` prefix: Claude Code adds the plugin's name itself; pi's adapter adds it.
+// `/flow` changes only the session it runs in; `/flow save` makes the
+// session's settings the default new sessions start with, and `/flow reset`
+// puts a session back on it (sessions.ts keeps each session's own). Each
+// adapter answers `/flow` through `replyTo`, keeping a change its own way.
 
 import { HUE_NAMES, hueNamed, type HueName } from './palette'
+import { DEFAULT_VOLUME } from './sound'
 import { hasNight, nextStyle, STYLES, styleNamed, type SceneName } from './styles'
 
 export type FlowMode = 'auto' | 'manual'
@@ -43,6 +48,8 @@ export type FlowConfig = {
   sound: FlowSound
   fade: FlowFade
   color: FlowColor
+  /** How loud the soundscape plays, 1 to 10: DEFAULT_VOLUME as tuned, 3 dB a step quieter below it (sound.ts's volumeGain). */
+  volume: number
 }
 /** What shows now, where a setting leaves it to chance: the scene and its colour's name. */
 export type Shown = { scene: SceneName; palette: string }
@@ -67,6 +74,7 @@ export function isNightAt(time: FlowTime, hour: number): boolean {
 export function readConfig(options: Readonly<Record<string, unknown>> | undefined): FlowConfig {
   const o = options ?? {}
   const level = Number(o.level)
+  const volume = Number(o.volume)
   return {
     mode: o.mode === 'manual' ? 'manual' : 'auto',
     style: o.style === 'random' ? 'random' : (typeof o.style === 'string' && styleNamed(o.style)) || 'fire',
@@ -77,6 +85,7 @@ export function readConfig(options: Readonly<Record<string, unknown>> | undefine
     sound: o.sound === 'on' ? 'on' : 'off',
     fade: o.fade === 'on' ? 'on' : 'off',
     color: o.color === 'random' ? 'random' : hueNamed(o.color) ?? 'natural',
+    volume: Number.isInteger(volume) && volume >= 1 && volume <= 10 ? volume : DEFAULT_VOLUME,
   }
 }
 
@@ -91,9 +100,37 @@ export function storedValue(field: keyof FlowConfig, value: FlowConfig[keyof Flo
   return value
 }
 
+/** A /config row as `$.config.list()` reads it: its key, the value as stored, the values it takes. */
+export type StoredRow = { key: string; value: unknown; options?: readonly string[] }
+/** A row left on a value Flow no longer takes: the value stored, and the one it stands for now. */
+export type StaleRow = { key: string; field: keyof FlowConfig; from: string; to: string | number }
+
+/**
+ * Flow's rows (`<plugin>.<field>`) holding a value none of their options are:
+ * a scene since renamed (`colony`, now `avalon`) or dropped (`river`, `lava`),
+ * an alias, idle's old `pilot`. Claude Code reads such a value as the row's
+ * default before Flow loads, and says so at every load; each comes back with
+ * what it stands for now (the default, for a scene that's gone). Flow reads
+ * them so (readConfig); that one's there at all says Flow was here before.
+ */
+export function staleRows(rows: readonly StoredRow[], plugin: string): StaleRow[] {
+  const fields = Object.keys(readConfig(undefined)) as (keyof FlowConfig)[]
+  const stale: StaleRow[] = []
+  for (const row of rows) {
+    const field = fields.find(f => row.key === `${plugin}.${f}`)
+    const { value, options } = row
+    if (!field || !options || typeof value !== 'string' || options.includes(value)) continue
+    const to = storedValue(field, readConfig({ [field]: value })[field])
+    if (options.includes(String(to))) stale.push({ key: row.key, field, from: value, to })
+  }
+  return stale
+}
+
 export type FlowCommand =
   | { kind: 'show' }
   | { kind: 'help' }
+  /** Every scene at once, to choose from (Claude Code: live thumbnails in a pane). */
+  | { kind: 'pick' }
   | { kind: 'auto' }
   | { kind: 'idle'; level: 0 | 1 }
   /** A fixed level; none given holds the configured one. */
@@ -102,8 +139,12 @@ export type FlowCommand =
   | { kind: 'style'; name?: FlowStyle; time?: FlowTime }
   | { kind: 'layout'; layout?: FlowLayout }
   | { kind: 'time'; time: FlowTime }
-  /** Sound on or off; none given toggles it. */
-  | { kind: 'sound'; sound?: FlowSound }
+  /** Sound on or off (none given toggles it), or on at a volume (1-10). */
+  | { kind: 'sound'; sound?: FlowSound; volume?: number }
+  /** Make this session's settings the default new sessions start with. */
+  | { kind: 'save' }
+  /** Put this session back on the default. */
+  | { kind: 'reset' }
   /** Fade on or off; none given toggles it. */
   | { kind: 'fade'; fade?: FlowFade }
   /** A colour; none given: the next named hue. */
@@ -112,6 +153,7 @@ export type FlowCommand =
 
 const SCENES = STYLES.join(', ')
 const USAGE = '! `/flow help` lists what it takes; `/flow next` cycles the scenes'
+const DEFAULT_USAGE = "! `/flow save` makes this session's settings your default; `/flow reset` puts this session back on it"
 
 const TIMES = new Map<string, FlowTime>([
   ['day', 'day'],
@@ -143,10 +185,18 @@ export function parseFlowArgs(args: string): FlowCommand {
     if (layout) return { kind: 'layout', layout }
     return { kind: 'error', text: '! `/flow band` (above the prompt) or `/flow spine` (a tall side pane)' }
   }
-  if (a === 'sound') {
-    if (b === undefined) return { kind: 'sound' }
+  // (`/flow volume 4` is `/flow sound 4`: the word people reach for.)
+  if (a === 'sound' || a === 'volume') {
+    if (b === undefined && a === 'sound') return { kind: 'sound' }
     if (b === 'on' || b === 'off') return { kind: 'sound', sound: b }
-    return { kind: 'error', text: '! `/flow sound` toggles the soundscape, or `/flow sound on` / `/flow sound off`' }
+    // A volume turns it on at that volume; 0 is off (as `/flow 0` is), the volume kept for next time.
+    if (b !== undefined && /^\d+$/.test(b)) {
+      const volume = Number(b)
+      if (volume === 0) return { kind: 'sound', sound: 'off' }
+      if (volume <= 10) return { kind: 'sound', sound: 'on', volume }
+      return { kind: 'error', text: `! the volume runs from 1 to 10 (${DEFAULT_VOLUME} plays as tuned); \`/flow sound 0\` or \`off\` turns it off` }
+    }
+    return { kind: 'error', text: '! `/flow sound` toggles the soundscape; `/flow sound on` / `off` sets it, `/flow sound 1-10` its volume' }
   }
   if (a === 'fade') {
     if (b === undefined) return { kind: 'fade' }
@@ -171,6 +221,11 @@ export function parseFlowArgs(args: string): FlowCommand {
     return { kind: 'error', text: USAGE }
   }
   if (a === 'help' || a === 'list' || a === '?') return { kind: 'help' }
+  if (a === 'pick') return { kind: 'pick' }
+  if (a === 'save') return { kind: 'save' }
+  if (a === 'reset') return { kind: 'reset' }
+  // (Either could be meant: say which is which.)
+  if (a === 'default' || a === 'defaults') return { kind: 'error', text: DEFAULT_USAGE }
   if (a === 'auto' || a === 'on') return { kind: 'auto' }
   if (a === 'next' || a === 'style') return { kind: 'style' }
   const layout = LAYOUTS.get(a)
@@ -214,8 +269,86 @@ const TINTS: Record<string, string> = { smoke: 'after a failure', blue: 'context
 
 const BACK_TO_AUTO = '`/flow auto` to follow the work again'
 
-/** `/flow` with no arguments: the scene, the mode and level now, any tint, the time of day. */
-export function statusText(cfg: FlowConfig, levelNow: number, tint: string, clock: Clock, shown?: Shown): string {
+/** The mode and its level, as a person thinks of them: `auto`, `off` or `holding 5/10`. */
+const modeText = (cfg: FlowConfig) => (cfg.mode === 'auto' ? 'auto' : cfg.level === 0 ? 'off' : `holding ${label(cfg.level)}`)
+
+/** The settings as a person thinks of them (the mode carries its level), in the status line's order. */
+type Item = 'style' | 'mode' | 'idle' | 'time' | 'layout' | 'sound' | 'volume' | 'fade' | 'color'
+const ITEMS: readonly Item[] = ['style', 'mode', 'idle', 'time', 'layout', 'sound', 'volume', 'fade', 'color']
+
+function itemText(cfg: FlowConfig, item: Item): string {
+  switch (item) {
+    case 'style':
+      return cfg.style
+    case 'mode':
+      return modeText(cfg)
+    case 'idle':
+      return `idle ${cfg.idle === 0 ? 'dark' : 'glow'}`
+    case 'time':
+      return cfg.time === 'clock' ? 'day and night by the clock' : cfg.time
+    case 'layout':
+      return cfg.layout
+    case 'sound':
+      return `sound ${cfg.sound}`
+    case 'fade':
+      return `fade ${cfg.fade}`
+    case 'color':
+      return `color ${cfg.color}`
+    case 'volume':
+      return `volume ${cfg.volume}/10`
+  }
+}
+
+/** Where two sets of settings differ, as a person would notice (a manual level held in auto mode doesn't show). */
+function differingItems(a: FlowConfig, b: FlowConfig): Item[] {
+  return ITEMS.filter(i => itemText(a, i) !== itemText(b, i))
+}
+
+const inWords = (cfg: FlowConfig, items: readonly Item[]) => items.map(i => itemText(cfg, i)).join(', ')
+
+/**
+ * What the harness can do that `/flow` speaks of: side panes (the spine, the picker's thumbnails), and a player
+ * for the soundscape. `thumbnails: false`: panes for the spine, but `/flow pick` is a list (opencode's).
+ */
+export type Host = { panes: boolean; sound: boolean; thumbnails?: boolean }
+/**
+ * The release of each host Flow is built and tested against (README's Compatibility): the oldest it's known to
+ * work on. On an older one it runs all the same, and says so once for that version (`versionNote`).
+ */
+export const BUILT_AGAINST = { 'Claude Code': '2.1.289', opencode: '2.0.29', pi: '1.0.0' } as const
+export type HostName = keyof typeof BUILT_AGAINST
+
+/** A version's numbers (`v2.0.29`, `2.1.280-dev.…`: the leading three), or none when it has none. */
+function versionParts(v: string): number[] | undefined {
+  const m = /(\d+)\.(\d+)(?:\.(\d+))?/.exec(v)
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)] : undefined
+}
+
+/** Whether version `a` is older than `b`. One that can't be read is never older (no warning on a guess). */
+export function olderThan(a: string, b: string): boolean {
+  const x = versionParts(a)
+  const y = versionParts(b)
+  if (!x || !y) return false
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i]! < y[i]!
+  return false
+}
+
+/** What to say on a host older than Flow is built against (none on one as new or newer, or unknown). */
+export function versionNote(host: HostName, version: string | undefined): string | undefined {
+  const min = BUILT_AGAINST[host]
+  if (!version || !olderThan(version, min)) return undefined
+  return `flow: built for ${host} ${min} or later, and this is ${version.replace(/^v/, '')}: it runs, but if a scene misbehaves, update ${host}.`
+}
+
+/** Claude Code: both. */
+export const CLAUDE_CODE: Host = { panes: true, sound: true }
+
+/**
+ * `/flow` with no arguments: the scene, the mode and level now, any tint, the
+ * time of day; then, where this session's settings differ from the default
+ * (`defaults`, what new sessions start with), what the default has instead.
+ */
+export function statusText(cfg: FlowConfig, levelNow: number, tint: string, clock: Clock, defaults?: FlowConfig, host: Host = CLAUDE_CODE, shown?: Shown): string {
   const scene = sceneOf(cfg, shown)
   const parts = [sceneText(cfg, shown)]
   parts.push(
@@ -229,15 +362,51 @@ export function statusText(cfg: FlowConfig, levelNow: number, tint: string, cloc
   if (hasNight(scene)) parts.push(timeText(cfg, clock))
   else if (cfg.time !== 'clock') parts.push(`${cfg.time} pinned (${scene} has no night)`)
   if (cfg.layout === 'spine') parts.push('spine')
-  if (cfg.sound === 'on') parts.push('sound on')
-  return `${parts.join(', ')}\nscenes: ${SCENES} · \`/flow next\` for another · \`/flow help\``
+  if (host.sound && cfg.sound === 'on') parts.push(`sound on at ${cfg.volume}/10`)
+  const lines = [parts.join(', ')]
+  const own = defaults ? differingItems(cfg, defaults) : []
+  if (defaults && own.length) {
+    lines.push(`just this session (your default: ${inWords(defaults, own)}) · \`/flow save\` makes this the default · \`/flow reset\` goes back`)
+  }
+  lines.push(`scenes: ${SCENES} · \`/flow pick\` to see them all · \`/flow next\` for another · \`/flow help\``)
+  return lines.join('\n')
 }
 
-/** `/flow help`: everything it takes (`panes`: whether the harness has the spine). */
-export function helpText(agent = "Claude's", panes = true): string {
+/**
+ * Under the reply to a change that first sets this session apart from the
+ * default: that it's this session's alone, and how to make it the default.
+ */
+export function ownHint(before: FlowConfig, after: FlowConfig, defaults: FlowConfig): string {
+  const first = !differingItems(before, defaults).length && differingItems(after, defaults).length > 0
+  return first ? '\njust this session · `/flow save` makes it your default for new sessions' : ''
+}
+
+/**
+ * What `/flow save` answers: `before` the default it replaced, `saved`
+ * whether anything was written, `refused` the fields /config would not take.
+ */
+export function savedText(cfg: FlowConfig, before: FlowConfig, saved: boolean, refused: readonly (keyof FlowConfig)[] = []): string {
+  const notSaved = refused.length ? `  (not saved: /config refused ${refused.join(', ')})` : ''
+  if (!saved) return refused.length ? `not saved: /config refused ${refused.join(', ')}` : 'already your default: new sessions start this way'
+  const items = differingItems(cfg, before)
+  return `saved as your default: new sessions start with ${items.length ? inWords(cfg, items) : 'these settings'}${notSaved}`
+}
+
+/** What `/flow reset` answers: `before` the session's settings, `defaults` what it's back on. */
+export function resetText(before: FlowConfig, defaults: FlowConfig): string {
+  const items = differingItems(before, defaults)
+  return items.length ? `back to your default: ${inWords(defaults, items)}` : 'already on your default'
+}
+
+/** `/flow help`: everything it takes (`panes`: whether the harness has panes: the spine, the picker's thumbnails). */
+export function helpText(agent = "Claude's", host: Host = CLAUDE_CODE): string {
+  const { panes } = host
   const lines = [
-    'ambient scenes that move with the work',
+    'ambient scenes that move with the work; each session keeps its own settings',
     `  /flow <name>          pick a scene: ${SCENES}`,
+    panes && host.thumbnails !== false
+      ? '  /flow pick            every scene live, side by side: arrows move, Enter picks, Esc closes'
+      : '  /flow pick            choose a scene from a list',
     '  /flow next            the next scene',
     '  /flow random          a scene picked as each session opens',
     '  /flow color <hue>     the scene in another hue: natural, random (one per session), or',
@@ -249,12 +418,17 @@ export function helpText(agent = "Claude's", panes = true): string {
     '  /flow 1-10 | off      hold a level (10 is the busiest), or switch it off',
     '  /flow idle glow|dark  in auto mode while idle: a low glow, or nothing',
     '  /flow fade [on|off]   each change of state relights it; it fades back over two minutes',
-    '  /flow sound [on|off]  a soundscape for each scene, swelling with the work (macOS); alone, toggles it',
   ]
+  if (host.sound) {
+    lines.push('  /flow sound [on|off]  a soundscape for each scene, swelling with the work (macOS); alone, toggles it')
+    lines.push(`  /flow sound 1-10      its volume, also /flow volume 1-10 (${DEFAULT_VOLUME} plays as tuned); 0 turns it off`)
+  }
   if (panes) {
     lines.push('  /flow band | spine    above the prompt, or a tall pane beside the transcript')
     lines.push('                        (also horizontal, bar or flat; portrait, vertical or side)')
   }
+  lines.push("  /flow save            make this session's settings the default new sessions start with")
+  lines.push('  /flow reset           put this session back on the default')
   return lines.join('\n')
 }
 
@@ -275,8 +449,10 @@ export function changesFor(cmd: FlowCommand, cfg: FlowConfig, shown?: Shown): Pa
       return { layout: cmd.layout ?? (cfg.layout === 'band' ? 'spine' : 'band') }
     case 'time':
       return { time: cmd.time }
-    case 'sound':
-      return { sound: cmd.sound ?? (cfg.sound === 'on' ? 'off' : 'on') }
+    case 'sound': {
+      const sound = cmd.sound ?? (cfg.sound === 'on' ? 'off' : 'on')
+      return cmd.volume === undefined ? { sound } : { sound, volume: cmd.volume }
+    }
     case 'fade':
       return { fade: cmd.fade ?? (cfg.fade === 'on' ? 'off' : 'on') }
     case 'color': {
@@ -286,6 +462,57 @@ export function changesFor(cmd: FlowCommand, cfg: FlowConfig, shown?: Shown): Pa
     }
     default:
       return undefined
+  }
+}
+
+/** A `/flow` reply: its text, and how pi shows it (a warning: a command not taken, a save that failed). */
+export type FlowReply = { text: string; level?: 'info' | 'warning' }
+
+/**
+ * What `/flow` needs of an adapter: the settings it shows (changed in place),
+ * what's on now, and keeping a change, a save or a reset its own way (Claude
+ * Code in its store and /config, pi in the session and flow.json).
+ */
+export interface FlowAdapter {
+  readonly host: Host
+  /** Whose work auto mode follows: "Claude's", "pi's". */
+  readonly agent: string
+  readonly cfg: FlowConfig
+  readonly clock: Clock
+  /** The defaults the status compares with (none: every session shares one set, so nothing is this session's alone). */
+  readonly defaults: FlowConfig | undefined
+  /** The level now, and the tint showing. */
+  level(): number
+  tint(): string
+  shown?(): Shown
+  /** `/flow save`, `/flow reset`: the reply. */
+  save(): Promise<FlowReply>
+  reset(): Promise<string>
+  /** Apply a change, and keep it: a note for the reply after the change's own words. */
+  change(changes: Partial<FlowConfig>): Promise<string>
+}
+
+/**
+ * `/flow <cmd>`'s reply, once the adapter has read the defaults afresh: the
+ * status, the help, what was wrong with it, or the save, reset or change done.
+ * (`/flow pick` is each adapter's own: it chooses a scene, and that's `/flow <scene>`.)
+ */
+export async function replyTo(cmd: FlowCommand, a: FlowAdapter): Promise<FlowReply> {
+  switch (cmd.kind) {
+    case 'show':
+      return { text: statusText(a.cfg, a.level(), a.tint(), a.clock, a.defaults, a.host, a.shown?.()) }
+    case 'help':
+      return { text: helpText(a.agent, a.host) }
+    case 'error':
+      return { text: cmd.text, level: 'warning' }
+    case 'save':
+      return a.save()
+    case 'reset':
+      return { text: await a.reset() }
+    default: {
+      const note = await a.change(changesFor(cmd, a.cfg, a.shown?.()) ?? {})
+      return { text: `${changedText(cmd, a.cfg, a.agent, a.clock, a.shown?.())}${note}` }
+    }
   }
 }
 
@@ -314,8 +541,14 @@ export function changedText(cmd: FlowCommand, cfg: FlowConfig, agent: string, cl
       return cfg.level === 0 ? `off — ${BACK_TO_AUTO}` : `holding ${label(cfg.level)} — ${BACK_TO_AUTO}`
     case 'layout':
       return cfg.layout === 'spine' ? 'spine — a tall pane beside the transcript' : 'band — above the prompt'
-    case 'sound':
-      return cfg.sound === 'on' ? "sound on — each scene's soundscape, swelling with the work (macOS)" : 'sound off'
+    case 'sound': {
+      if (cfg.sound !== 'on') return 'sound off'
+      const at = `sound on at ${cfg.volume}/10`
+      if (cmd.volume === undefined) return `${at} — each scene's soundscape, swelling with the work (macOS) · \`/flow sound 1-10\` sets the volume`
+      if (cfg.volume > DEFAULT_VOLUME) return `${at} — past ${DEFAULT_VOLUME}, the quieter sounds come up most: the loudest already play near full`
+      // ("As tuned", not "the default": your default is whatever /config's row holds.)
+      return cfg.volume === DEFAULT_VOLUME ? `${at}, as tuned` : `${at} (${DEFAULT_VOLUME} plays as tuned)`
+    }
     case 'time': {
       const what =
         cfg.time === 'clock'
@@ -351,6 +584,41 @@ export function readTips(v: unknown): Tips {
   return t
 }
 
+/** What the settings show has been on (another scene, the sound), noted for the tips. */
+export function noteTips(tips: Tips, cfg: FlowConfig): Tips {
+  const t: Tips = { ...tips }
+  if (cfg.style !== 'fire') t.otherScene = true
+  if (cfg.sound === 'on') t.triedSound = true
+  return t
+}
+
+/**
+ * The tips' first record, for someone with none (kept from a session's start,
+ * before its own `/flow` can store anything). Someone new has been told
+ * nothing. Someone who had Flow before tips were kept (`usedBefore`: other
+ * state of Flow's already kept, a /config row from an older Flow) or has
+ * changed a default (`settings`: the /config rows) has been told both: they
+ * may well have found the other scenes and the sound already, and been
+ * through them.
+ */
+export function firstTips(usedBefore: boolean, settings: FlowConfig): Tips {
+  const defaults = readConfig(undefined)
+  const changed = (Object.keys(defaults) as (keyof FlowConfig)[]).some(k => settings[k] !== defaults[k])
+  return usedBefore || changed ? { scenesTold: true, soundTold: true } : {}
+}
+
+/**
+ * A chance for a one-time tip over the tips as they're kept (raw, as stored): the tip, if one's due, the tips
+ * to keep, and whether they changed (else there's nothing to write). `noteOnly`: no chance (no prompt to toast
+ * over), but what's on is noted all the same (see noteTips): the sound turned on and off again in such a
+ * session still counts as tried. Each adapter keeps the tips its own way; this is the rest.
+ */
+export function tipChance(kept: unknown, cfg: FlowConfig, noteOnly = false): { tip?: string; tips: Tips; changed: boolean } {
+  const before = readTips(kept)
+  const { tip, tips } = noteOnly ? { tip: undefined, tips: noteTips(before, cfg) } : nextTip(before, cfg)
+  return { tip, tips, changed: JSON.stringify(tips) !== JSON.stringify(before) }
+}
+
 /**
  * A chance to give a tip (a `/flow` just run, or a session starting), with the
  * settings as they now are: the tip to give, if any, and the tips to keep.
@@ -358,15 +626,13 @@ export function readTips(v: unknown): Tips {
  * been on; then, three chances on, the sound, if it has never been on.
  */
 export function nextTip(tips: Tips, cfg: FlowConfig): { tip?: string; tips: Tips } {
-  const t: Tips = { ...tips }
-  if (cfg.style !== 'fire') t.otherScene = true
-  if (cfg.sound === 'on') t.triedSound = true
+  const t = noteTips(tips, cfg)
   if (!t.scenesTold) {
     t.scenesTold = true
     t.since = 0
     if (!t.otherScene)
       return {
-        tip: `flow: the fire is one of ${STYLES.length} scenes (${STYLES.filter(s => s !== 'fire').join(', ')}): \`/flow next\` steps through them, or \`/flow <name>\` picks one.`,
+        tip: `flow: the fire is one of ${STYLES.length} scenes (${STYLES.filter(s => s !== 'fire').join(', ')}): \`/flow pick\` shows them all at once, \`/flow next\` steps through them, or \`/flow <name>\` picks one.`,
         tips: t,
       }
     return { tips: t }

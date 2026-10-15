@@ -1,4 +1,4 @@
-// REVISION: flow-v82-hue-box
+// REVISION: flow-v186-upstream-merge
 //
 // What a scene file exports so Flow can list it: its name, a line for
 // /config, whether it has a night, and how to build one. `styles.ts` keeps
@@ -21,7 +21,7 @@ export interface SceneDef<N extends string = string> {
    * Its main hue (OKLCH degrees) and how far a palette may turn it: a fire
    * turns any way (180), a sky only a little, or it would go green.
    */
-  hue: SceneHue
+  hue?: SceneHue
   /** A new instance; `seed` makes it repeatable (tests, previews). */
   make(seed?: number): Scene
 }

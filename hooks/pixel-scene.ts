@@ -1,10 +1,12 @@
-// REVISION: flow-v81-pixel-scene
+// REVISION: flow-v170-dry-scenes
 //
 // The quick way to write a scene: extend PixelScene and paint pixels. It
 // does what every scene otherwise does by hand: eases the level and the
 // night, sizes a pixel layer to the grid (2 × 2 pixels a cell), folds it
 // into quadrant glyphs (fitQuad), lays braille specks over it, blanks
-// everything at level 0, and encodes the frame.
+// everything at level 0, breathes the frame in sepia while Claude waits on
+// the person (waiting.ts; `d.wait` says how far, to settle your own way
+// too), and encodes the frame.
 //
 //   class Aurora extends PixelScene {
 //     paint(px: Painter, d: Dials) {
@@ -17,11 +19,11 @@
 // or less), and `resize(d)` to set up per-size state.
 
 import { Cells, DEFAULT_COLOR, isTall } from './cells'
-import { BRAILLE, clamp, fitQuad, QUAD, type QuadFit } from './pixels'
+import { easeNight } from './night'
+import { BITS, BRAILLE, clamp, fitQuad, QUAD, type QuadFit } from './pixels'
 import type { Scene, Tint } from './styles'
+import { easeWait, waitTone } from './waiting'
 
-/** How many of a quadrant mask's four pixels are set. */
-const BITS = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4] as const
 
 /** The terminal's own color: a pixel left this shows whatever is behind the scene. */
 export const CLEAR = DEFAULT_COLOR
@@ -38,6 +40,8 @@ export type Dials = {
   tint: Tint
   /** Above 0 while subagents run: add company. */
   boost: number
+  /** Claude waits on the person, eased: 0 no .. 1 yes. Settle and hold (the frame's sepia breath is done for you). */
+  wait: number
   /** The grid, in cells. */
   columns: number
   rows: number
@@ -59,6 +63,8 @@ export class Painter {
   readonly px: Int32Array
   /** Pixels that must keep their own color when a cell is folded (a small sprite's). */
   readonly keep: Uint8Array
+  /** Per cell: a light's color (`lamp`), which keeps its own color through the waiting look's sepia; -1 none. */
+  readonly lamps: Int32Array
   /** Per cell: braille dot bits and their color. */
   readonly dots: Uint8Array
   readonly dotColor: Int32Array
@@ -70,6 +76,7 @@ export class Painter {
     this.dh = rows * 4
     this.px = new Int32Array(this.w * this.h)
     this.keep = new Uint8Array(this.w * this.h)
+    this.lamps = new Int32Array(columns * rows).fill(-1)
     this.dots = new Uint8Array(columns * rows)
     this.dotColor = new Int32Array(columns * rows)
   }
@@ -77,6 +84,7 @@ export class Painter {
   clear(color = CLEAR): void {
     this.px.fill(color)
     this.keep.fill(0)
+    this.lamps.fill(-1)
     this.dots.fill(0)
   }
 
@@ -88,6 +96,19 @@ export class Painter {
     const i = y * this.w + x
     this.px[i] = color
     if (keep) this.keep[i] = 1
+  }
+
+  /**
+   * A light: a pixel that keeps its color (as `set` with `keep`) and shines
+   * through the sepia while Claude waits on the person, only breathing: a
+   * signal, a lamp. One a cell (the last set).
+   */
+  lamp(x: number, y: number, color: number): void {
+    x |= 0
+    y |= 0
+    if (x < 0 || y < 0 || x >= this.w || y >= this.h) return
+    this.set(x, y, color, true)
+    this.lamps[(y >> 1) * (this.w >> 1) + (x >> 1)] = color
   }
 
   get(x: number, y: number): number {
@@ -118,13 +139,13 @@ export abstract class PixelScene implements Scene {
   coverageBoost = 0
   tint: Tint = 'normal'
   night = false
+  waiting = false
   /** How far the level moves toward the dial each frame (0..1): lower glides slower. */
   protected levelEase = 0.05
-  /** How far night moves each frame (0..1). */
-  protected nightEase = 0.04
 
   private level = Number.NaN
   private kNight = -1
+  private kWait = 0
   private t = 0
   private columns = 0
   private rows = 0
@@ -133,6 +154,8 @@ export abstract class PixelScene implements Scene {
   private readonly q = new Int32Array(4)
   private readonly ks = new Int32Array(4)
   private readonly fit: QuadFit = { mask: 0, fg: 0, bg: 0, spread: 0 }
+  /** What `dials()` hands out: one object, refilled each call. */
+  private readonly d: Dials = { level: 0, t: 0, night: 0, tint: 'normal', boost: 0, wait: 0, columns: 0, rows: 0, tall: false }
 
   constructor(readonly seed = 1) {}
 
@@ -145,17 +168,19 @@ export abstract class PixelScene implements Scene {
   /** The grid changed size (and on the first frame): set up per-size state. */
   protected resize(_d: Dials): void {}
 
+  /** This frame's dials: one object, refilled each call (read it during the call it's handed to; don't keep it). */
   protected dials(): Dials {
-    return {
-      level: Number.isNaN(this.level) ? clamp(this.strength, 0, 10) : this.level,
-      t: this.t,
-      night: Math.max(0, this.kNight),
-      tint: this.tint,
-      boost: this.coverageBoost,
-      columns: this.columns,
-      rows: this.rows,
-      tall: isTall(this.columns, this.rows),
-    }
+    const d = this.d
+    d.level = Number.isNaN(this.level) ? clamp(this.strength, 0, 10) : this.level
+    d.t = this.t
+    d.night = Math.max(0, this.kNight)
+    d.tint = this.tint
+    d.boost = this.coverageBoost
+    d.wait = this.kWait
+    d.columns = this.columns
+    d.rows = this.rows
+    d.tall = isTall(this.columns, this.rows)
+    return d
   }
 
   ensure(columns: number, rows: number): void {
@@ -173,9 +198,8 @@ export abstract class PixelScene implements Scene {
     if (Number.isNaN(this.level)) this.level = want
     const dl = want - this.level
     this.level += Math.abs(dl) < 0.01 ? dl : dl * this.levelEase
-    const n = this.night ? 1 : 0
-    if (this.kNight < 0) this.kNight = n
-    this.kNight += clamp(n - this.kNight, -this.nightEase, this.nightEase)
+    this.kNight = easeNight(this.kNight, this.night)
+    this.kWait = easeWait(this.kWait, this.waiting)
     this.update(this.dials())
   }
 
@@ -242,6 +266,7 @@ export abstract class PixelScene implements Scene {
       } else if (mask === 0 && bg === CLEAR) out.blank(cell)
       else out.set(cell, QUAD[mask]!, fg, bg)
     }
+    waitTone(out, this.kWait, this.t, undefined, p.lamps)
     return out
   }
 

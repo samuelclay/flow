@@ -1,4 +1,4 @@
-// REVISION: flow-v119-drain
+// REVISION: flow-v181-doom-volleys
 //
 // Soundscapes. Claude Code's `$.audio.play` plays a clip (macOS `afplay`) at a
 // gain set when it starts; it can't loop smoothly or change a clip as it
@@ -14,20 +14,26 @@
 //   for events.
 // - Events: what happens on screen (a stage separating, a sonic boom, the
 //   catch, splashdown) plays its clip at once (`EVENTS`); small, dense ones
-//   (a bubble bursting, a spark) are synthesized here and gathered a quarter
-//   second at a time into one clip (`burst`), each at its moment.
+//   (a bubble bursting, a spark) are synthesized here and gathered a second
+//   at a time into one clip (`burst`), each at its moment.
+// - The volume: the sound setting (`/flow sound 1-10`) scales every play as it
+//   starts (`volumeGain`), never past the gain at which a clip clips.
+// - The chime: when Claude starts waiting on the person (a permission, a
+//   question, a plan), two soft struck tubes rising a fourth (`CHIME`), once
+//   a wait and not for one right behind another (`chimeStep`), the same in
+//   every scene.
 //
 // Pure: no engine imports, unit-tested directly.
 
 import { Rng, toBase64 } from './cells'
-import { BED_GAINS, SOUND_FILES } from './sound-files'
+import { BED_GAINS } from './sound-files'
 import type { Tint } from './styles'
 
 const RATE = 22050
 const TAU = Math.PI * 2
 
 /**
- * A bed take's length, and the crossfade at each end. A layer's next take
+ * A bed take's length, and the crossfade at each end. A bed's next take
  * starts as the one playing begins to fade (BED_EVERY_MS after it), up to
  * half a second sooner at random (BED_MIN_MS) so no seam keeps a beat: the
  * overlap only grows, never opens a gap, though a clip starts on the first
@@ -55,7 +61,7 @@ export const PLAYER_LEAD_MS = 380
 export const PLAYER_DRAIN_MS = 900
 
 /** The most events a scene holds for the adapter to take each frame (one that never takes them stays bounded). */
-export const EVENTS_HELD = 16
+export const EVENTS_HELD = 24
 
 /** Pushes an event onto a scene's queue unless it's full. */
 export function hear(queue: SoundEvent[], e: SoundEvent): void {
@@ -85,6 +91,27 @@ export type SoundKind =
   | 'crash' // a wave breaking
   | 'lap' // a small wave on a calm sea
   | 'swish' // a ski turn
+  | 'horn' // a train's horn: pulling away, or before a level crossing
+  | 'pistol' // the marine's guns firing, each its own (a squad marine's too, quieter)
+  | 'shotgun'
+  | 'chaingun'
+  | 'plasma'
+  | 'foeshot' // a zombie firing back, down the hall
+  | 'splat' // a monster going down
+  | 'barrel' // a barrel going up
+  | 'fireball' // a fireball thrown
+  | 'door' // a door rising (through his eyes)
+  | 'reload' // a gun changed
+  | 'teleport' // a squad marine teleporting out, its agent done
+  | 'step' // a footfall
+  | 'rattle3' // a chaingun's volley, a shot every 3 frames (rattle4, rattle5: every 4, 5)
+  | 'rattle4'
+  | 'rattle5'
+  | 'bolts2' // a plasma rifle's volley, a bolt every 2 frames (bolts3: every 3)
+  | 'bolts3'
+  | 'cease' // a gun fallen silent before its volley's clip ran out: that clip stops
+  | 'streak' // a shooting star
+  | 'comet' // a comet coming into the sky
 export type SoundEvent = { kind: SoundKind; v: number }
 
 /** What a scene is doing now, for its bed: each 0..1 (a scene reports the ones it has). */
@@ -103,11 +130,11 @@ export type Ambience = {
   sea?: number
   /** The swell, and a wave's lip pitching over. */
   swell?: number
-  curl?: number
+  lip?: number
 }
 
-/** Everything a clip is drawn from. */
-export type SoundMood = { scene: string; level: number; tint: Tint; night: boolean; amb: Ambience }
+/** Everything a clip is drawn from, and the sound setting's volume (1..10, DEFAULT_VOLUME when absent): a bed starts a fresh take when it changes. */
+export type SoundMood = { scene: string; level: number; tint: Tint; night: boolean; amb: Ambience; volume?: number }
 
 /** A clip being drawn: samples, and the tools the recipes mix with. */
 class Mix {
@@ -128,59 +155,11 @@ class Mix {
     return this.rng.f() * 2 - 1
   }
 
-  /** Filtered noise across the clip: `lo` low-passes, `hi` takes off what's under it (one-pole coefficients); `amp(t)` shapes it. */
-  noise(lo: number, hi: number, amp: (t: number) => number, from = 0, to = this.n): void {
-    let a = 0
-    let b = 0
-    for (let i = from; i < to; i++) {
-      const w = this.white()
-      a += lo * (w - a)
-      b += hi * (a - b)
-      this.buf[i]! += (a - b) * amp((i - from) / RATE)
-    }
-  }
-
-  /** A resonant band of noise (a 2-pole filter), its centre `hz(t)`, sharpness `q`. */
-  ring(hz: (t: number) => number, q: number, amp: (t: number) => number): void {
-    let y1 = 0
-    let y2 = 0
-    const r = 1 - 1 / q
-    for (let i = 0; i < this.n; i++) {
-      const t = i / RATE
-      const c = 2 * r * Math.cos((TAU * hz(t)) / RATE)
-      const y = this.white() * (1 - r) + c * y1 - r * r * y2
-      y2 = y1
-      y1 = y
-      this.buf[i]! += y * amp(t)
-    }
-  }
-
-  /** A tone gliding by `hz(t)`, shaped by `amp(t)` (phase kept continuous through the glide). */
-  tone(hz: (t: number) => number, amp: (t: number) => number, from = 0, len = this.n / RATE): void {
-    let ph = this.rng.f() * TAU
-    const i1 = Math.min(this.n, from + Math.floor(len * RATE))
-    for (let i = from; i < i1; i++) {
-      const t = (i - from) / RATE
-      ph += (TAU * hz(t)) / RATE
-      this.buf[i]! += Math.sin(ph) * amp(t)
-    }
-  }
-
   /** An event's voice at `at` seconds, `len` long: `voice(dt)` per sample. */
   at(at: number, len: number, voice: (dt: number) => number): void {
     const i0 = Math.floor(at * RATE)
     const i1 = Math.min(this.n, i0 + Math.floor(len * RATE))
     for (let i = Math.max(0, i0); i < i1; i++) this.buf[i]! += voice((i - i0) / RATE)
-  }
-
-  /** `per` events a second scattered through the clip. */
-  sprinkle(per: number, len: number, voice: (dt: number, x: number) => number): void {
-    const seconds = this.n / RATE
-    const count = Math.floor(per * seconds + this.rng.f())
-    for (let j = 0; j < count; j++) {
-      const x = this.rng.f()
-      this.at(this.rng.f() * seconds, len, dt => voice(dt, x))
-    }
   }
 
   /** Faded in and out over `fade` seconds (equal power), soft-clipped, as base64 WAV. */
@@ -218,8 +197,9 @@ class Mix {
 
 const decay = (dt: number, tau: number) => Math.exp(-dt / tau)
 
-/** A clip to play and how loud (linear gain, 0..4). */
-export type Play = { asset: string; gain: number }
+/** A clip to play and how loud (linear gain, capped at MAX_GAIN). */
+/** A clip to play; a `volley`'s stops early on a `cease`. */
+export type Play = { asset: string; gain: number; volley?: boolean }
 
 /** One layer of a scene's bed: a clip with `variants` takes, at a gain from the mood (`s`: the level, 0..1). */
 type Layer = { clip: string; variants: number; gain: (s: number, m: SoundMood) => number }
@@ -251,11 +231,54 @@ const MASTER: Record<string, (s: number) => number> = {
   surf: s => 0.25 + 0.6 * s,
   ski: () => 1.4,
   bubbles: s => 1 - 1.1 * Math.max(0, s - 0.5),
+  train: s => 0.2 + 0.38 * Math.sqrt(s),
+  earthrise: s => 0.8 + 1.5 * s - 0.6 * s * s,
+  doom: s => 0.5 + 1.35 * s - 0.75 * s * s,
 }
+
+/** A scene that sounds as another does (doom3d is doom through his eyes): its bed and its master. */
+const SOUNDS_AS: Readonly<Record<string, string>> = { doom3d: 'doom' }
+export const soundsAs = (scene: string): string => SOUNDS_AS[scene] ?? scene
 
 /** A scene's master volume at a level (0..10). */
 export function master(scene: string, level: number): number {
-  return (MASTER[scene] ?? (() => 1))(Math.max(0, Math.min(1, level / 10)))
+  return (MASTER[soundsAs(scene)] ?? (() => 1))(Math.max(0, Math.min(1, level / 10)))
+}
+
+/** The most a play's gain may be: clips peak at -2 to -3 dBFS and afplay's gain multiplies, so past this it clips. */
+export const MAX_GAIN = 1.4
+
+/** The sound setting's volume (1..10) that plays at the loudness curve above, as it was tuned. */
+export const DEFAULT_VOLUME = 7
+
+/**
+ * Each volume's step from that loudness, in dB (index: volume - 1): 3 dB a step
+ * below the default, down to -18 at 1; up to +6 at 10 above it, though the
+ * loudest plays have little or no headroom left (see `volumeGain`).
+ */
+export const VOLUME_DB: readonly number[] = [-18, -15, -12, -9, -6, -3, 0, 2, 4, 6]
+
+/**
+ * Above the default, a play this far (dB) or more below MAX_GAIN gets a step's
+ * whole lift; nearer, less. (No less than the top step: else a loud play
+ * lifted could overtake a louder one.)
+ */
+const LIFT_DB = 12
+
+/**
+ * A play's gain at the sound setting's volume (1..10), never past MAX_GAIN.
+ * At the default, the gain as it is (capped). Below it, every play turned down
+ * alike. Above it, a play well below MAX_GAIN lifted by the step's whole dB, a
+ * louder one by less, tapering to none at MAX_GAIN: the range compressed
+ * rather than cut flat at the cap, so a busier moment still plays louder than
+ * a calmer one, and nothing clips.
+ */
+export function volumeGain(gain: number, volume: number): number {
+  const g = Math.max(0, Math.min(MAX_GAIN, gain))
+  const v = Number.isFinite(volume) ? Math.max(1, Math.min(10, Math.round(volume))) : DEFAULT_VOLUME
+  const db = VOLUME_DB[v - 1]!
+  const lift = db <= 0 || g === 0 ? db : db * Math.min(1, (20 * Math.log10(MAX_GAIN / g)) / LIFT_DB)
+  return Math.min(MAX_GAIN, g * 10 ** (lift / 20))
 }
 
 /** Each scene's bed, as layers of clips. */
@@ -318,10 +341,37 @@ export const LAYERS: Record<string, Layer[]> = {
   ],
   falcon: rocketLayers('rocket/roar'),
   starship: rocketLayers('starship/roar'),
+  train: [
+    // The wheels' roll and the wind past it both rising with speed (0 standing); the diesel idling while it
+    // waits, working as it runs, flat out at the top (three pitches, crossfading); the open air while it
+    // stands (the horn is an event).
+    { clip: 'train/rumble', variants: BED_TAKES, gain: (s, m) => ((m.amb.wind ?? s) > 0 ? 0.25 + 0.75 * (m.amb.wind ?? s) : 0) },
+    { clip: 'train/rush', variants: BED_TAKES, gain: (s, m) => 0.55 * (m.amb.wind ?? s) ** 2 },
+    { clip: 'train/air', variants: BED_TAKES, gain: (s, m) => ((m.amb.wind ?? s) > 0 ? 0.05 : 0.18) },
+    { clip: 'train/drone1', variants: BED_TAKES, gain: (s, m) => 0.6 * Math.max(0, 1 - (m.amb.wind ?? s) / 0.3) },
+    { clip: 'train/drone2', variants: BED_TAKES, gain: (s, m) => 0.35 * Math.max(0, 1 - Math.abs((m.amb.wind ?? s) - 0.42) / 0.32) },
+    { clip: 'train/drone3', variants: BED_TAKES, gain: (s, m) => 0.35 * Math.max(0, 1 - Math.abs((m.amb.wind ?? s) - 0.88) / 0.3) },
+  ],
+  earthrise: [
+    // No air on the moon: no noise or wind, only steady low tones in one key: a deep drone, its fifth, and a
+    // chord above them filling in with the work (each shooting star and comet is an event).
+    { clip: 'earthrise/drone', variants: BED_TAKES, gain: s => 0.5 - 0.15 * s },
+    { clip: 'earthrise/fifth', variants: BED_TAKES, gain: s => 0.15 + 0.1 * s },
+    { clip: 'earthrise/chord', variants: BED_TAKES, gain: s => 0.04 + 0.45 * s },
+  ],
+  doom: [
+    // The base: its machinery's hum and the air handlers, computer banks chirping, nukage bubbling in the
+    // floor; the fighting farther off rumbling louder with the level (every shot, fall and blast is an event).
+    { clip: 'doom/hum', variants: BED_TAKES, gain: s => 0.4 - 0.15 * s },
+    { clip: 'doom/air', variants: BED_TAKES, gain: s => 0.14 + 0.08 * s },
+    { clip: 'doom/computers', variants: BED_TAKES, gain: s => 0.22 },
+    { clip: 'doom/nukage', variants: BED_TAKES, gain: s => 0.2 * (1 - 0.6 * s) },
+    { clip: 'doom/rumble', variants: BED_TAKES, gain: s => 0.55 * s * s },
+  ],
 }
 
 /** Events with a clip of their own (`sounds/<clip>.m4a`), and how loud by their size. */
-export const EVENTS: Partial<Record<SoundKind, { clip: string; variants: number; gain: (v: number) => number }>> = {
+export const EVENTS: Partial<Record<SoundKind, { clip: string; variants: number; gain: (v: number) => number; volley?: boolean }>> = {
   ignite: { clip: 'events/ignite', variants: 1, gain: () => 1 },
   sep: { clip: 'events/sep', variants: 1, gain: () => 0.9 },
   sonic: { clip: 'events/sonic', variants: 1, gain: () => 1 },
@@ -336,14 +386,43 @@ export const EVENTS: Partial<Record<SoundKind, { clip: string; variants: number;
   swish: { clip: 'events/swish', variants: 3, gain: v => 0.25 + 0.6 * v },
   clank: { clip: 'events/clank', variants: 1, gain: v => 0.25 + 0.35 * v },
   lap: { clip: 'events/lap', variants: 3, gain: v => 0.35 + 0.6 * v },
+  horn: { clip: 'events/horn', variants: 3, gain: v => 0.35 + 0.6 * v },
+  pistol: { clip: 'events/pistol', variants: 3, gain: v => 0.8 * v },
+  shotgun: { clip: 'events/shotgun', variants: 3, gain: v => 0.95 * v },
+  chaingun: { clip: 'events/chaingun', variants: 3, gain: v => 0.45 * v },
+  plasma: { clip: 'events/plasma', variants: 3, gain: v => 0.28 * v },
+  rattle3: { clip: 'events/rattle3-', variants: 2, gain: v => 0.45 * v, volley: true },
+  rattle4: { clip: 'events/rattle4-', variants: 2, gain: v => 0.45 * v, volley: true },
+  rattle5: { clip: 'events/rattle5-', variants: 2, gain: v => 0.45 * v, volley: true },
+  bolts2: { clip: 'events/bolts2-', variants: 2, gain: v => 0.28 * v, volley: true },
+  bolts3: { clip: 'events/bolts3-', variants: 2, gain: v => 0.28 * v, volley: true },
+  foeshot: { clip: 'events/pistol', variants: 3, gain: v => 0.12 + 0.3 * v },
+  splat: { clip: 'events/splat', variants: 3, gain: v => 0.35 + 0.5 * v },
+  barrel: { clip: 'events/blast', variants: 3, gain: () => 1 },
+  fireball: { clip: 'events/fireball', variants: 3, gain: v => 0.35 * v },
+  door: { clip: 'events/door', variants: 1, gain: () => 0.6 },
+  reload: { clip: 'events/reload', variants: 1, gain: () => 0.6 },
+  teleport: { clip: 'events/teleport', variants: 1, gain: () => 0.7 },
+  streak: { clip: 'events/streak', variants: 3, gain: v => 0.2 + 0.45 * v },
+  comet: { clip: 'events/comet', variants: 1, gain: () => 0.6 },
 }
 
 /** A clip's file: one of its variants, picked by a hash of the moment and the clip (no fixed rotation to fall in step with). */
 function asset(clip: string, variants: number, seed: number): string {
   if (variants <= 1) return `sounds/${clip}.m4a`
-  let h = 2166136261
-  for (let i = 0; i < clip.length; i++) h = Math.imul(h ^ clip.charCodeAt(i), 16777619)
-  return `sounds/${clip}${1 + Math.floor(unit(seed ^ h) * variants)}.m4a`
+  return `sounds/${clip}${1 + Math.floor(unit(seed ^ clipHash(clip)) * variants)}.m4a`
+}
+
+/** Each clip's name hashed (FNV-1a), worked out once: a bed asks every frame. */
+const CLIP_HASH = new Map<string, number>()
+function clipHash(clip: string): number {
+  let h = CLIP_HASH.get(clip)
+  if (h === undefined) {
+    h = 2166136261
+    for (let i = 0; i < clip.length; i++) h = Math.imul(h ^ clip.charCodeAt(i), 16777619)
+    CLIP_HASH.set(clip, h)
+  }
+  return h
 }
 
 /** A bed's mood: its key, and the level (0..1) and doings its mix is made for. */
@@ -379,6 +458,13 @@ export const MOODS: Record<string, (m: SoundMood) => BedMood> = {
     const b = band(10 * (m.amb.wind ?? m.level / 10))
     return { key: `w${b}`, s: BAND_S[b]!, amb: { wind: BAND_S[b] } }
   },
+  // The train by its speed (amb.wind: the level that runs at it), standing still its own mood.
+  train: m => {
+    const w = m.amb.wind ?? m.level / 10
+    if (w < 0.02) return { key: 'v0', s: 0, amb: { wind: 0 } }
+    const b = band(10 * w)
+    return { key: `v${b + 1}`, s: BAND_S[b]!, amb: { wind: BAND_S[b] } }
+  },
   balloon: m => {
     const b = band(m.level)
     const u = on(m.amb.burner)
@@ -386,6 +472,8 @@ export const MOODS: Record<string, (m: SoundMood) => BedMood> = {
   },
   falcon: rocketMood,
   starship: rocketMood,
+  earthrise: byLevel,
+  doom: byLevel,
 }
 
 /** A layer's gain in a mood's mix (the mix is made at these, before the scene's master volume). */
@@ -418,47 +506,75 @@ function nearest(scene: string, key: string): string | undefined {
   return best
 }
 
-/** The clips of a scene's bed for this moment (none for a scene without one: it's silent). */
-export function bedPlays(mood: SoundMood, seed: number): Play[] | undefined {
-  if (!bedLayers(mood.scene)) return undefined
-  const p = bedPlay(mood, 0, seed)
-  return p ? [p] : []
-}
+/** Each scene's moods (`scene/key`) as the bed mixed nearest them, worked out once each (a bed asks every frame): its clip and gain, none for a scene without beds. */
+const NEAREST = new Map<string, { clip: string; gain: number } | undefined>()
 
 /** The scene's bed's next take for this mood (undefined when it's silent now), never one of those in `not`. */
-export function bedPlay(mood: SoundMood, _stream: number, seed: number, not: string[] = []): Play | undefined {
-  const spec = MOODS[mood.scene]
-  const key = spec && nearest(mood.scene, spec(mood).key)
-  if (!key) return undefined
-  const gain = master(mood.scene, mood.level) * (BED_GAINS[`${mood.scene}/${key}`] ?? 0)
+export function bedPlay(mood: SoundMood, seed: number, not: readonly string[] = []): Play | undefined {
+  const scene = soundsAs(mood.scene)
+  const spec = MOODS[scene]
+  if (!spec) return undefined
+  const want = `${scene}/${spec(mood).key}`
+  let bed = NEAREST.get(want)
+  if (bed === undefined && !NEAREST.has(want)) {
+    const key = nearest(scene, want.slice(scene.length + 1))
+    bed = key === undefined ? undefined : { clip: `${scene}/bed-${key}`, gain: BED_GAINS[`${scene}/${key}`] ?? 0 }
+    NEAREST.set(want, bed)
+  }
+  if (!bed) return undefined
+  const gain = master(scene, mood.level) * bed.gain
   if (gain <= 0.01) return undefined
-  let a = asset(`${mood.scene}/bed-${key}`, BED_TAKES, seed)
-  for (let k = 1; not.includes(a) && k < 64; k++) a = asset(`${mood.scene}/bed-${key}`, BED_TAKES, seed + k * 7919)
-  return { asset: a, gain: Math.min(1.4, gain) }
+  let a = asset(bed.clip, BED_TAKES, seed)
+  for (let k = 1; not.includes(a) && k < 64; k++) a = asset(bed.clip, BED_TAKES, seed + k * 7919)
+  return { asset: a, gain: Math.min(MAX_GAIN, gain) }
 }
 
-/** How many bed streams a scene has: one, or none (silent). */
-export function bedLayers(scene: string): number {
-  return MIXED.has(scene) ? 1 : 0
-}
-
-/** When a layer's next take is due after this one: BED_MIN_MS to BED_EVERY_MS, at random. */
+/** When a bed's next take is due after this one: BED_MIN_MS to BED_EVERY_MS, at random. */
 export function bedGap(seed: number): number {
   const h = Math.imul(seed ^ 0x9e3779b9, 2654435761) >>> 0
   return BED_MIN_MS + ((h >>> 8) % (BED_EVERY_MS - BED_MIN_MS + 1))
 }
 
-/** A bed's take playing now: its clip and gain, when it started, when the next is due, the take it's replacing (stopped `hold` ms in: once this one has faded in, or sooner when the old one is the louder), and from when it plays alone. */
-export type BedTake = { id: number; asset: string; gain: number; at: number; due: number; retire?: number; hold: number; alone: number }
+/**
+ * A bed's take playing now: its clip and gain, when it started, when the next
+ * is due, the take it's replacing (stopped `hold` ms in: once this one has
+ * faded in, or sooner when the old one is the louder), from when it plays
+ * alone, the volume it plays at, when it leaves the player (`end`), and the
+ * take before it (`prev`: its id and when it leaves the player), stopped
+ * with it should the bed fall silent while that one still fades.
+ */
+export type BedTake = {
+  id: number
+  asset: string
+  gain: number
+  at: number
+  due: number
+  retire?: number
+  hold: number
+  alone: number
+  volume: number
+  end: number
+  prev?: { id: number; end: number }
+  /** The bed fell silent: no take plays, and those it stopped have left the player by this time. */
+  quiet?: number
+}
+
+/** A take stopped leaves the player this long after (afplay exiting). */
+const STOPPED_MS = 100
+
+/** A bed take's mix, whichever of its takes it is (`sounds/fire/bed-l2`). */
+const mixOf = (asset: string) => asset.replace(/\d\.m4a$/, '')
 
 /**
  * One frame of a scene's bed: which takes to start (`play`, each with an id
  * for stopping it later) and which to stop. `takes` is the caller's, kept
- * between frames (one slot a layer). A layer renews as its take fades; it
- * starts afresh when its gain has moved by more than 3 dB (at most once a
- * crossfade), the old take stopped when the new one is in (sooner when the
- * level fell, so it falls promptly); it stops when it
- * falls silent (a rocket's engines cutting off, the burner's valve closing).
+ * between frames: one slot, the bed's (a scene has one bed or none). The bed
+ * renews as its take fades; it starts afresh when its gain has moved by more
+ * than 3 dB or the volume setting has changed (at most once a crossfade), the
+ * old take stopped when the new one is in (sooner when it's the quieter, so
+ * the bed falls promptly); it stops when it falls silent (a rocket's engines
+ * cutting off, the burner's valve closing). Its gains are before the volume,
+ * which the player applies to every clip (`volumeGain`).
  */
 export function bedStep(
   takes: (BedTake | undefined)[],
@@ -468,43 +584,131 @@ export function bedStep(
 ): { play: (Play & { id: number })[]; stop: number[] } {
   const play: (Play & { id: number })[] = []
   const stop: number[] = []
-  for (let i = 0; i < bedLayers(mood.scene); i++) {
-    const t = takes[i]
-    if (t?.retire !== undefined && clock - t.at >= t.hold) {
-      stop.push(t.retire)
-      t.retire = undefined
-    }
-    const want = bedPlay(mood, i, seed * 32 + i, t ? [t.asset] : [])
-    if (!want) {
-      if (t) stop.push(t.id, ...(t.retire !== undefined ? [t.retire] : []))
-      takes[i] = undefined
-      continue
-    }
-    const due = !t || clock >= t.due
-    const mix = (asset: string) => asset.replace(/\d\.m4a$/, '')
-    // (Only once the take before has gone, so the bed never holds more than two of the player's few plays.)
-    const moved = !!t && clock >= t.alone && clock - t.at >= BED_FADE_MS && (mix(want.asset) !== mix(t.asset) || want.gain > t.gain * 1.4 || want.gain < t.gain / 1.4)
-    if (!due && !moved) continue
-    const id = seed * 32 + i
-    const from = t && !moved ? t.due : clock
-    const hold = moved && want.gain < t!.gain ? BED_FADE_MS / 3 : BED_FADE_MS
-    // (A take holds its place in the player till afplay exits: stopped, a moment after; played out, its drain after.)
-    const alone = moved ? clock + hold + 100 : t ? t.at + BED_MS + PLAYER_DRAIN_MS : clock
-    takes[i] = { id, asset: want.asset, gain: want.gain, at: clock, due: Math.max(clock + BED_MIN_MS, from + bedGap(id)), retire: moved ? t!.id : undefined, hold, alone }
-    play.push({ ...want, id })
+  if (!MIXED.has(soundsAs(mood.scene))) return { play, stop }
+  const volume = mood.volume ?? DEFAULT_VOLUME
+  const slot = takes[0]
+  // (A bed fallen silent keeps its slot, quiet, till the takes it stopped have left the player.)
+  const quiet = slot?.quiet
+  const t = quiet === undefined ? slot : undefined
+  if (t?.retire !== undefined && clock - t.at >= t.hold) {
+    stop.push(t.retire)
+    t.retire = undefined
   }
+  const id = seed * 32
+  const want = bedPlay(mood, id, t ? [t.asset] : [])
+  if (!want) {
+    // Silent: this take, the one it's replacing, and the one before still fading out, all at once.
+    if (t) {
+      stop.push(t.id)
+      if (t.retire !== undefined) stop.push(t.retire)
+      if (t.prev && t.prev.end > clock && t.prev.id !== t.retire) stop.push(t.prev.id)
+      takes[0] = { ...t, retire: undefined, prev: undefined, quiet: clock + STOPPED_MS }
+    } else if (quiet !== undefined && clock >= quiet) takes[0] = undefined
+    return { play, stop }
+  }
+  // Sound again straight after a silence: once what it stopped has gone.
+  if (quiet !== undefined && clock < quiet) return { play, stop }
+  const due = !t || clock >= t.due
+  // (Only once the take before has gone, so the bed never holds more than two of the player's few plays.)
+  const moved = !!t && clock >= t.alone && clock - t.at >= BED_FADE_MS && (mixOf(want.asset) !== mixOf(t.asset) || want.gain > t.gain * 1.4 || want.gain < t.gain / 1.4 || volume !== t.volume)
+  if (!due && !moved) return { play, stop }
+  const from = t && !moved ? t.due : clock
+  // (A take holds its place in the player till afplay exits: stopped, a moment after; played out, its drain after.)
+  const hold = moved
+    ? volumeGain(want.gain, volume) < volumeGain(t!.gain, t!.volume) ? BED_FADE_MS / 3 : BED_FADE_MS
+    : t?.retire !== undefined ? Math.max(0, t.at + t.hold - clock) : BED_FADE_MS
+  // The take before this one, still in the player: the one it replaces (stopped once this is in), or the one
+  // fading out (the later to leave of the last take and its own before, should the last have been refused).
+  const prev = !t ? undefined : moved ? { id: t.id, end: clock + hold + STOPPED_MS } : t.prev && t.prev.end > t.end ? t.prev : { id: t.id, end: t.end }
+  const alone = prev ? Math.max(clock, prev.end) : clock
+  takes[0] = {
+    id,
+    asset: want.asset,
+    gain: want.gain,
+    at: clock,
+    due: Math.max(clock + BED_MIN_MS, from + bedGap(id)),
+    // (A take refused before its own crossfade was done hands the stop of the one it replaced on.)
+    retire: moved ? t!.id : t?.retire,
+    hold,
+    alone,
+    volume,
+    end: clock + BED_MS + PLAYER_DRAIN_MS,
+    prev,
+  }
+  play.push({ ...want, id })
   return { play, stop }
+}
+
+/**
+ * A bed's take the player refused for good (full every time it was tried):
+ * it never played, so it's done now and its next is due at once, the next
+ * frame's `bedStep` starting a fresh one rather than leave the bed silent
+ * till the take would have renewed.
+ */
+export function bedFailed(takes: (BedTake | undefined)[], id: number, clock: number): void {
+  const t = takes.find(t => t?.id === id && t.quiet === undefined)
+  if (!t) return
+  t.end = clock
+  t.due = clock
+}
+
+/**
+ * The chime as Claude starts waiting on the person: its clip (three takes, each
+ * struck a little differently) and gain. Not by the scene's master: it's one
+ * clip for every scene, about as loud as a scene at 6 (well over a bed's calm 2,
+ * gently: a cue, not an alarm).
+ */
+export const CHIME = { clip: 'events/chime', variants: 3, gain: 0.26 }
+/** A wait chimes this far in (one answered at once never does), and not within this long of the last wait or chime. */
+export const CHIME_DELAY_MS = 600
+export const CHIME_QUIET_MS = 20_000
+
+/** What the chime remembers: when the wait now began (-1: none), when the last one ended, whether this one's settled, the last chime. */
+export type ChimeState = { since: number; ended: number; done: boolean; last: number }
+
+export function newChimeState(): ChimeState {
+  return { since: -1, ended: -Infinity, done: false, last: -Infinity }
+}
+
+/**
+ * One frame of the chime (`clock` in ms): whether to play it now. A wait
+ * chimes once, CHIME_DELAY_MS in, unless the last wait ended (or a chime
+ * played) less than CHIME_QUIET_MS before it began: back-to-back asks find
+ * you there already.
+ */
+export function chimeStep(s: ChimeState, waiting: boolean, clock: number): boolean {
+  if (!waiting) {
+    if (s.since >= 0) s.ended = clock
+    s.since = -1
+    return false
+  }
+  if (s.since < 0) {
+    s.since = clock
+    s.done = clock - s.ended < CHIME_QUIET_MS || clock - s.last < CHIME_QUIET_MS
+  }
+  if (s.done || clock - s.since < CHIME_DELAY_MS) return false
+  s.done = true
+  s.last = clock
+  return true
+}
+
+/** The chime's clip: one of its takes. */
+export function chimePlay(seed: number): Play {
+  return { asset: asset(CHIME.clip, CHIME.variants, seed), gain: CHIME.gain }
 }
 
 /** An event's clip at the scene's volume, or undefined when it's synthesized (gathered into a `burst`). */
 export function eventPlay(e: SoundEvent, seed: number, scene: string, level: number): Play | undefined {
   const c = EVENTS[e.kind]
-  // (Clips peak near full scale and afplay's gain multiplies: past ~1.4 it clips.)
-  return c && { asset: asset(c.clip, c.variants, seed), gain: Math.min(1.4, c.gain(e.v) * master(scene, level)) }
+  // (Clips peak near full scale and afplay's gain multiplies: past MAX_GAIN it clips.)
+  return c && { asset: asset(c.clip, c.variants, seed), gain: Math.min(MAX_GAIN, c.gain(e.v) * master(scene, level)), volley: c.volley }
 }
 
-/** Each event's voice: how long it rings, and its sound. */
-const VOICES: Record<SoundKind, { len: number; voice: (m: Mix, dt: number, v: number, x: number) => number }> = {
+/**
+ * The voices of the events without a clip of their own (`EVENTS`): small and
+ * dense, so synthesized here and gathered into a burst. How long each rings, and its sound.
+ */
+const VOICES: Partial<Record<SoundKind, { len: number; voice: (m: Mix, dt: number, v: number, x: number) => number }>> = {
   pop: {
     // A bubble bursting rings at its resonance (lower for a bigger one), the pitch rising as it dies away.
     len: 0.08,
@@ -515,26 +719,11 @@ const VOICES: Record<SoundKind, { len: number; voice: (m: Mix, dt: number, v: nu
     },
   },
   crack: { len: 0.03, voice: (m, dt, v) => m.white() * decay(dt, 0.0025) * (0.12 + 0.12 * v) },
-  hit: {
-    len: 0.35,
-    voice: (m, dt, v) => Math.sin(TAU * (1100 - 1800 * dt) * dt) * decay(dt, 0.08) * (0.3 + 0.3 * v) + m.white() * decay(dt, 0.03) * 0.25 * (0.5 + v),
+  // A boot on a steel deck: a dull knock (pitched where a laptop plays it) with a scuff of grit, heavier running.
+  step: {
+    len: 0.09,
+    voice: (m, dt, v, x) => (Math.sin(TAU * (150 + 60 * x) * dt) * decay(dt, 0.02) * 0.7 + m.white() * decay(dt, 0.005) * 0.4) * (0.06 + 0.1 * v),
   },
-  chuff: { len: 0.25, voice: (m, dt, v) => m.white() * decay(dt, 0.06) * Math.min(1, dt * 120) * (0.4 + 0.3 * v) },
-  clank: { len: 0.3, voice: (m, dt) => (Math.sin(TAU * 620 * dt) + 0.7 * Math.sin(TAU * 1013 * dt) + 0.4 * Math.sin(TAU * 1720 * dt)) * decay(dt, 0.07) * 0.18 },
-  ignite: { len: 2.2, voice: (m, dt) => m.white() * Math.min(1, dt / 1.2) * decay(Math.max(0, dt - 1.4), 0.35) * 0.7 },
-  sep: { len: 0.9, voice: (m, dt) => Math.sin(TAU * 58 * dt) * decay(dt, 0.25) * 0.7 + m.white() * decay(dt, 0.02) * 0.5 },
-  boom: { len: 1.8, voice: (m, dt) => (Math.sin(TAU * 42 * dt) * 0.7 + m.white() * 0.8) * decay(dt, 0.45) * Math.min(1, dt * 40) },
-  splash: { len: 1.0, voice: (m, dt) => m.white() * decay(dt, 0.25) * Math.min(1, dt * 30) * 0.6 },
-  clang: {
-    len: 0.9,
-    voice: (m, dt) => (Math.sin(TAU * 310 * dt) + 0.8 * Math.sin(TAU * 467 * dt) + 0.5 * Math.sin(TAU * 791 * dt)) * decay(dt, 0.22) * 0.3,
-  },
-  chute: { len: 0.5, voice: (m, dt) => m.white() * Math.sin(Math.PI * Math.min(1, dt / 0.5)) * 0.35 },
-  thud: { len: 0.4, voice: (m, dt) => Math.sin(TAU * 70 * dt) * decay(dt, 0.1) * 0.6 + m.white() * decay(dt, 0.015) * 0.3 },
-  sonic: { len: 1.2, voice: (m, dt) => (dt < 0.14 ? 1 - dt / 0.07 : 0) * 0.8 + m.white() * decay(dt, 0.4) * 0.3 },
-  lap: { len: 1.6, voice: (m, dt, v) => m.white() * Math.min(1, dt / 0.6) * decay(dt, 0.5) * (0.15 + 0.2 * v) },
-  crash: { len: 1.6, voice: (m, dt, v) => m.white() * Math.min(1, dt / 0.15) * decay(dt, 0.45) * (0.35 + 0.35 * v) },
-  swish: { len: 0.35, voice: (m, dt, v) => m.white() * Math.sin(Math.PI * Math.min(1, dt / 0.35)) * (0.15 + 0.25 * v) },
 }
 
 /** A number in [0, 1) from a seed, scattered (neighbouring seeds land far apart). */
@@ -565,12 +754,14 @@ export function gather<T>(queue: T[], seen: number, e: T, seed: number): void {
 
 /** The events gathered over a moment, each at its offset (seconds), drawn into one clip. */
 export function burst(events: readonly (SoundEvent & { offset: number })[], seed: number): string | undefined {
-  if (!events.length) return undefined
+  // (Only the events without a clip of their own come here: those have a voice.)
+  const voiced = events.filter(e => VOICES[e.kind])
+  if (!voiced.length) return undefined
   let end = 0
-  for (const e of events) end = Math.max(end, e.offset + VOICES[e.kind].len)
+  for (const e of voiced) end = Math.max(end, e.offset + VOICES[e.kind]!.len)
   const m = new Mix(end, seed)
-  for (const e of events) {
-    const { len, voice } = VOICES[e.kind]
+  for (const e of voiced) {
+    const { len, voice } = VOICES[e.kind]!
     const x = m.rng.f()
     m.at(e.offset, len, dt => voice(m, dt, e.v, x))
   }

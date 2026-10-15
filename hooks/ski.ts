@@ -1,4 +1,4 @@
-// REVISION: flow-v106-hue
+// REVISION: flow-v186-upstream-merge
 //
 // A skier on a mountain, on the fire's dials: the level is the speed and the
 // steepness. At 1 the skier stands at the top of the run, poles planted,
@@ -22,17 +22,27 @@
 // a braille layer on top (2×4 per cell) for the fine things: snowflakes,
 // spray specks and ski tracks, wherever the cell under them is plain.
 //
-// Dials: running subagents put more skiers on the slope (each in their own
-// jacket); a failed command makes the skier wipe out in a puff of snow (a
-// yard sale: skis crossed, one stuck upright) under a flurry until things
-// are fixed; a nearly-full context turns the light to dusk.
+// Dials: each running subagent is a skier of its own, in its own jacket
+// (crew.ts): they ski in from behind (uphill: the left of the band, the top
+// of the spine) when the agent starts, carve S-turns throwing spray while it
+// works, pull over to the side and stand on their poles while it's quiet
+// (waving a pole while it waits on you), and when it's done tuck and ski off
+// ahead out of sight (or, if it failed, drop back behind). A failed command
+// makes the skier wipe out in a puff of snow (a yard sale: skis crossed, one
+// stuck upright) under a flurry until things are fixed; a nearly-full
+// context turns the light to dusk. While Claude waits on the
+// person the skier skids to a stop and stands, poles planted, the whole view
+// breathing in sepia (waiting.ts).
 
-import { Cells, DEFAULT_COLOR, Rng, isTall } from './cells'
+import type { AgentDial } from './agents'
+import { Cells, DEFAULT_COLOR, freshSeed, Rng, isTall } from './cells'
+import { beckon, Crew, finished, resting, type AgentMark, type Mate } from './crew'
 import type { Tint } from './styles'
-import { MOON, moonCover, moonPixel, moonRadius, NIGHT_HORIZON, NIGHT_ZENITH, STAR } from './night'
-import { BRAILLE, clamp, fitQuad, hashMurmur as hash, mix, QUAD, type QuadFit } from './pixels'
+import { easeNight, MOON, moonCover, moonPixel, moonRadius, NIGHT_HORIZON, NIGHT_ZENITH, STAR } from './night'
+import { approach, BRAILLE, clamp, fitQuad, hashMurmur as hash, mix, QUAD, type QuadFit } from './pixels'
 import { defineScene } from './scene-def'
-import type { Ambience, SoundEvent } from './sound'
+import { hear, type Ambience, type SoundEvent } from './sound'
+import { easeWait, waitTone } from './waiting'
 
 // ---------------------------------------------------------------- tables
 
@@ -50,10 +60,17 @@ const MOGULS = [0, 0, 0, 0.4, 0.8, 1, 0.9, 0.6, 0.2, 0, 0]
 const GATES = [0, 0, 0.15, 0.35, 0.45, 0.45, 0.35, 0.25, 0.1, 0, 0]
 /** The spine scrolls in rows: a row is twice as tall as a pixel column is wide. */
 const SPINE = 0.42
+/** A spine skier's size in pixels (a little over its sprite's), to stand one clear of another. */
+const SKIER_WIDE = 8
+const SKIER_TALL = 10
 /** Frames to get up again after a fall. */
 const GET_UP = 18
 
 // ---------------------------------------------------------------- helpers
+
+// The run's own value noise, on its own hash (pixels.ts's noise1 and noise2
+// are the same curves on other hashes): its peaks, pines and snow stay where
+// they've always been, and the spine's per-pixel snow stays a local call.
 
 /** Smooth 1-D value noise in [0, 1). */
 function noise(x: number, s: number): number {
@@ -213,11 +230,6 @@ const NIGHT_GREY: Pal = {
 
 const PAL_KEYS = Object.keys(DAY) as (keyof Pal)[]
 
-/** `v` eased a fraction `k` of the way to `goal`, landing on it once close. */
-function approach(v: number, goal: number, k: number): number {
-  const n = v + (goal - v) * k
-  return Math.abs(goal - n) < 0.01 ? goal : n
-}
 
 /** What the skiers' kit leans toward by night. */
 const NIGHT_SHADE = 0x0a1428
@@ -248,6 +260,8 @@ const sp = (ax: number, rows: string[]): Sprite => ({ w: rows[0]!.length, h: row
 // Side view (the band), facing downhill to the right.
 // The body is two pixels wide at columns 2-3, drawn on an even pixel so it fills one cell column.
 const B_STAND = sp(2, ['..HH...', '..RRR..', '.pRR.p.', '.pPP.p.', 'SSSSSSS'])
+/** Standing, a pole lifted overhead and waved: a companion whose agent waits on you. */
+const B_WAVE = sp(2, ['..HH.p.', '..RRRp.', '.pRR.p.', '.pPP...', 'SSSSSSS'])
 const B_SKI = sp(2, ['..HH...', '..RRR..', '.pRR...', 'p.PP...', 'SSSSSSS'])
 const B_CARVE = sp(2, ['..HH...', '..RRRp.', '..RR.p.', '.pPP...', 'SSSSSSS'])
 const B_TUCK = sp(2, ['..HH...', '.RRRRR.', 'ppPP...', 'SSSSSSS'])
@@ -278,15 +292,24 @@ interface Skier {
   fx: number
   fy: number
   lat: number
+  /** The agent whose companion this skier is now (its track starts afresh with a new one). */
+  owner: string
 }
 
 export class Ski {
   strength = 8
   coverageBoost = 0
+  /** The subagents, one by one: each skis as a companion, in the kit after the hero's. */
+  agents: readonly AgentDial[] = []
+  private crew = new Crew(KITS.length - 1)
   sounds: SoundEvent[] = []
   tint: Tint = 'normal'
   /** Night: moonlit snow, stars and a moon; the hut's window lit. */
   night = false
+  /** Claude waits on the person: the skier stops and stands. */
+  waiting = false
+  /** How far into the wait's look (0..1), eased. */
+  private kWait = 0
   // The light, eased toward the dials (-1 until the first frame): night, overcast, dusk.
   private kNight = -1
   private kGrey = 0
@@ -356,9 +379,11 @@ export class Ski {
   private fp = new Float32Array(FLAKES)
 
   private skiers: Skier[] = []
+  /** `onSlope`'s list, reused. */
+  private slope = [0]
 
-  constructor(seed?: number) {
-    this.seed = (seed ?? Date.now()) % 100_000
+  constructor(seed = freshSeed()) {
+    this.seed = seed % 100_000
     this.rng = new Rng(this.seed * 2654435761 + 7)
     const offs = [0, 2.2, 4.1, 1.1, 3.3]
     const anchors = [0.28, 0.52, 0.12, 0.7, 0.86]
@@ -375,6 +400,7 @@ export class Ski {
         fx: 0,
         fy: 0,
         lat: 0,
+        owner: '',
       })
     this.spineAnchors = spineAnchors
   }
@@ -430,7 +456,7 @@ export class Ski {
       this.kGrey = g
       this.kDusk = b
     }
-    this.kNight = approach(this.kNight, n, 0.04)
+    this.kNight = easeNight(this.kNight, this.night)
     this.kGrey = approach(this.kGrey, g, 0.05)
     this.kDusk = approach(this.kDusk, b, 0.05)
     const p = this.palette
@@ -441,8 +467,37 @@ export class Ski {
     }
   }
 
-  private extras(): number {
-    return this.coverageBoost <= 0 ? 0 : Math.min(KITS.length - 1, Math.ceil(this.coverageBoost / 15))
+  /** The skiers on the slope this frame (one list, refilled): the hero (0), then each companion's (its slot + 1). */
+  private onSlope(): number[] {
+    const out = this.slope
+    out.length = 0
+    out.push(0)
+    for (const m of this.crew.mates) out.push(m.slot + 1)
+    return out
+  }
+
+  /** The companion skiing as skier `i`, if any (the hero is no one's). */
+  private mateOf(i: number): Mate | undefined {
+    return i === 0 ? undefined : this.crew.inSlot(i - 1)
+  }
+
+  /** How far off its place a companion is as it arrives or leaves (0 at its place): -1 behind, +1 ahead. */
+  private away(m: Mate): number {
+    const k = 1 - m.here
+    return finished(m) ? k : -k
+  }
+
+  /** A companion standing on its poles (`resting`) waving one (up, then down): its agent waits on you. */
+  private waving(m: Mate | undefined): boolean {
+    return m !== undefined && resting(m) && m.waiting && beckon(m, this.t)
+  }
+
+  /** Back to front: across the band's face, and down the spine. */
+  private readonly byLat = (a: number, b: number) => this.skiers[a]!.lat - this.skiers[b]!.lat
+  private readonly byDepth = (a: number, b: number) => this.skiers[a]!.fy - this.skiers[b]!.fy
+
+  agentMarks(): readonly AgentMark[] {
+    return this.level > 0 ? this.crew.marks : []
   }
 
   // ------------------------------------------------------------ motion
@@ -454,7 +509,9 @@ export class Ski {
   step(): void {
     if (this.columns === 0) return
     this.ease()
+    this.crew.update(this.agents, this.coverageBoost)
     this.t++
+    this.kWait = easeWait(this.kWait, this.waiting)
     const L = this.level
     if (L === 0) return
     // A failed command: down in a puff of snow until it's fixed, then up again.
@@ -469,9 +526,10 @@ export class Ski {
     this.fallT++
     if (this.fall === 2 && this.fallT > GET_UP) this.fall = 0
 
-    const vT = this.fall ? 0 : SPEED[L]!
+    // Waiting on the person: they skid to a stop and stand there till it's answered.
+    const vT = this.fall || this.waiting ? 0 : SPEED[L]!
     if (this.fall === 1) this.v *= 0.86
-    else this.v += (vT - this.v) * (vT > this.v ? 0.022 : 0.04)
+    else this.v += (vT - this.v) * (vT > this.v ? 0.022 : this.waiting ? 0.07 : 0.04)
     if (this.v < 0.004) this.v = vT > 0 ? this.v : 0
     this.steep += (L / 10 - this.steep) * 0.03
     const moving = Math.min(1, this.v / 0.35)
@@ -521,20 +579,47 @@ export class Ski {
 
   /** Each skier's feet this frame (layout coords), their tracks, and their spray. */
   private place(): void {
-    const n = this.extras()
     const tall = this.tall
-    for (let i = 0; i <= n; i++) {
+    for (const i of this.onSlope()) {
       const s = this.skiers[i]!
-      const lat = i === 0 && this.fall ? s.lat : this.amp * Math.sin(this.phi + s.off)
+      const m = this.mateOf(i)
+      if (m && s.owner !== m.id) {
+        // A new companion in this kit: its own tracks, from where it comes in.
+        s.owner = m.id
+        s.len = 0
+        s.lastD = -1e9
+      }
+      let lat = i === 0 && this.fall ? s.lat : this.amp * Math.sin(this.phi + s.off)
+      // Its agent gone quiet: it straightens up and pulls over to one side of the run.
+      if (m) lat += ((m.slot & 1 ? -0.6 : 0.6) * Math.max(0.3, this.amp) - lat) * (1 - m.busy)
       // Each turn's edge change, heard.
-      if (i === 0 && Math.sign(lat) !== Math.sign(s.lat) && this.sounds.length < 8) this.sounds.push({ kind: 'swish', v: Math.min(1, this.v / 2) })
+      if (i === 0 && Math.sign(lat) !== Math.sign(s.lat)) hear(this.sounds, { kind: 'swish', v: Math.min(1, this.v / 2) })
       s.lat = lat
       if (tall) {
         const half = this.room()
         s.fx = this.pw / 2 + lat * half
-        s.fy = this.d * SPINE + Math.round(this.ph * (this.spineAnchors[i]! - this.spineAnchors[0]!))
+        // A companion comes down from above, and leaves off the bottom (or, failed, drops back up behind). Its
+        // place is never above the summit: one placed uphill of the hero waits just under it at the start,
+        // a skier's width to the side (the hero stands there too), easing back into line as the run takes
+        // it below.
+        const off = m ? this.away(m) * this.ph * 0.8 : 0
+        let fy = this.d * SPINE + Math.round(this.ph * (this.spineAnchors[i]! - this.spineAnchors[0]!))
+        if (m) {
+          const floor = 4 + 2 * m.slot
+          const aside = clamp((floor - fy) / SKIER_TALL, 0, 1)
+          fy = Math.max(fy, floor)
+          s.fx += (this.skiers[0]!.fx + (m.slot & 1 ? -1 : 1) * SKIER_WIDE - s.fx) * aside
+        }
+        s.fy = fy + Math.round(off)
       } else {
-        const sx = this.anchorX(i)
+        let sx = this.anchorX(i)
+        if (m) {
+          // Resting, it drifts back a little; it comes in from behind (the left), and leaves ahead off the
+          // right (or, failed, drops back off the left).
+          sx -= (1 - m.busy) * this.pw * 0.04
+          const a = this.away(m)
+          if (a !== 0) sx += a * (a > 0 ? this.pw + 14 - sx : sx + 14)
+        }
         s.fx = this.d + sx
         s.fy = 0 // resolved against the ground at draw time
       }
@@ -556,7 +641,7 @@ export class Ski {
         s.head = (s.head + 1) % TRK
         s.len = Math.min(TRK, s.len + 1)
       }
-      if (onGround) this.spray(s, i === 0 ? 1 : 0.55)
+      if (onGround && (!m || m.busy > 0.5)) this.spray(s, i === 0 ? 1 : 0.55)
     }
   }
 
@@ -702,10 +787,12 @@ export class Ski {
     this.bits.fill(0)
     if (this.kit.length !== this.pw * this.ph) this.kit = new Uint8Array(this.pw * this.ph)
     else this.kit.fill(0)
+    this.crew.clearMarks()
     if (this.tall) this.drawSpine()
     else this.drawBand()
     this.drawFlakes()
     this.composite()
+    waitTone(out, this.kWait, this.t)
     return out
   }
 
@@ -934,8 +1021,8 @@ export class Ski {
     this.drawKicker(kick2 - cam, gr)
 
     // Tracks across the face, then the skiers (back to front by depth), then the snow they throw.
-    const n = this.extras()
-    for (let i = 0; i <= n; i++) this.bandTrack(this.skiers[i]!, gr, faceH)
+    const on = this.onSlope()
+    for (const i of on) this.bandTrack(this.skiers[i]!, gr, faceH)
     this.drawParticles(
       x => x - cam,
       (y, x) => {
@@ -943,7 +1030,7 @@ export class Ski {
         return gr[sxp]! + 1 + y
       },
     )
-    const order = [0, 1, 2, 3, 4].slice(0, n + 1).sort((a, b) => this.skiers[a]!.lat - this.skiers[b]!.lat)
+    const order = on.sort(this.byLat)
     // Front row: a few big pines whipping past at speed. Drawn before the
     // skiers, so they pass behind them: crossing in front, a near-black pine
     // at night blinks the skier out and back again and again.
@@ -997,12 +1084,15 @@ export class Ski {
       this.sprite(B_DOWN, x, fy, s.kit)
       return
     }
-    const fast = this.v > SPEED[8]! * 0.92
-    const standing = this.v < 0.12 || (hero && this.fall === 2)
-    let spr = standing ? B_STAND : fast ? B_TUCK : B_SKI
+    const m = this.mateOf(i)
+    // A companion leaving tucks to ski off; resting, it stands on its poles (waving one, waiting on you).
+    const fast = this.v > SPEED[8]! * 0.92 || finished(m)
+    const standing = this.v < 0.12 || (hero && this.fall === 2) || resting(m)
+    let spr = this.waving(m) ? B_WAVE : standing ? B_STAND : fast ? B_TUCK : B_SKI
     // Leaning on the edge mid-turn.
     if (!standing && !fast && Math.abs(Math.cos(this.phi + s.off)) > 0.8) spr = B_CARVE
     this.sprite(spr, x, fy, s.kit)
+    if (m) this.crew.mark(m, x / 2 - 1, (fy - spr.h) / 2, 4, 3, this.columns, this.rows)
     // Deep powder buries the skis.
     if (this.steep > 0.75 && air <= 0.3)
       for (let k = -2; k <= 4; k++) this.blend(x + k, fy, this.pal.spray, clamp((this.steep - 0.75) * 3, 0, 0.75))
@@ -1167,8 +1257,8 @@ export class Ski {
     }
 
     // Tracks, the scenery lying flat (gates, kickers), shadows; then upright things in depth order.
-    const n = this.extras()
-    for (let i = 0; i <= n; i++) this.spineTrack(this.skiers[i]!, top)
+    const on = this.onSlope()
+    for (const i of on) this.spineTrack(this.skiers[i]!, top)
     this.spineFlat(top, ew)
     this.spineKicker(top)
     this.drawParticles(
@@ -1181,7 +1271,7 @@ export class Ski {
     const span = 4
     const s0 = Math.floor((top - 4) / span)
     const s1 = Math.floor((top + H + 12) / span)
-    const order = [0, 1, 2, 3, 4].slice(0, n + 1).sort((a, b) => this.skiers[a]!.fy - this.skiers[b]!.fy)
+    const order = on.sort(this.byDepth)
     let next = 0
     for (let slot = s0; slot <= s1; slot++) {
       const wyBase = slot * span
@@ -1367,8 +1457,10 @@ export class Ski {
       for (let k = 0; k < 3; k++) this.put(x + 4 + k, y - 2 + (k >> 1), POLE)
       return
     }
-    const standing = this.v < 0.12 || (hero && this.fall === 2)
-    const fast = this.v > SPEED[8]! * 0.92
+    const m = this.mateOf(i)
+    const standing = this.v < 0.12 || (hero && this.fall === 2) || resting(m)
+    const fast = this.v > SPEED[8]! * 0.92 || finished(m)
+    if (m) this.crew.mark(m, (x - 3) / 2, (y - 7) / 2, 4, 5, this.columns, this.rows)
     // Heading: across the hill when stopped, else down the fall line swinging with the turns.
     const ph = this.phi + s.off
     const latV = this.amp * Math.cos(ph) * this.rate * this.room()
@@ -1391,9 +1483,11 @@ export class Ski {
     }
     // Poles: planted beside them when stopped, trailing behind when skiing.
     if (standing) {
+      // Waiting on you, one pole waves overhead.
+      const lift = this.waving(m) ? 4 : 0
       for (let k = 1; k < 4; k++) {
         this.put(x - 2, y - k, POLE)
-        this.put(x + 2, y - k, POLE)
+        this.put(x + 2, y - k - lift, POLE)
       }
     } else if (!fast) {
       for (const side of [-1, 1]) {

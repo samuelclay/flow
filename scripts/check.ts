@@ -1,20 +1,30 @@
-// REVISION: flow-v82-box-hue
+// REVISION: flow-v186-upstream-merge
 //
 // What every scene must hold to (AGENTS.md), measured: plugin.json lists
-// the scenes in SCENES, level 0 draws nothing, a frame has at most 1024
-// colour pairs (in every palette too), and step() + grid() takes under ~2 ms
-// at the band's and the spine's sizes. crabigator's column sizes are checked
-// the same way. Exits 1 on any failure. Not part of the mod (Node).
+// the scenes in SCENES, hooks/sound-files.ts lists the clips in sounds/,
+// level 0 draws nothing, a frame has at most 1024 colour pairs, and
+// step() + grid() takes under ~2 ms at the band's and the spine's sizes
+// (a scene with a taller view of its own, doom3d's, at its taller band too)
+// (with subagents' companions too, working and waiting on the person: the
+// slower is shown). Each over every backdrop a scene passes through (avalon's
+// suns and nebulae). Exits 1 on any failure. Not part of the mod (Node).
 //
-//   npm run check              every scene
-//   npm run check -- surf ski  just these
+//   npm run check                every scene
+//   npm run check -- surf ski    just these
+//   FLOW_MAX_MS=6 npm run check  a looser time budget, as CI runs it
 
+import { join } from 'node:path'
+import { SOUND_FILES } from '../hooks/sound-files'
+import { makeScene } from '../hooks/styles'
+import { listClips } from './clips'
 import { syncManifest } from './sync-manifest'
-import { BOXES, build, nightsOf, pairs, scenesFrom, TINTS, turned } from './scene-lab'
+import { BOXES, turned, backdropsOf, build, LOOKS, nightsOf, pairs, scenesFrom } from './scene-lab'
 import { HUES } from '../hooks/palette'
 
 const MAX_PAIRS = 1024
-const MAX_MS = 2
+// CI's shared runners are slower and noisier than a laptop, so CI loosens the
+// budget (FLOW_MAX_MS) to catch only a scene that's several times over it.
+const MAX_MS = Number(process.env.FLOW_MAX_MS) || 2
 const SIZES = [
   [250, 5],
   [80, 5],
@@ -28,6 +38,11 @@ const TIMED = [
   [250, 5],
   [22, 60],
 ] as const
+/** A taller scene's band (`Scene.taller`: as many rows as pi's flow.json gives it, 14 unless it says), timed in place of the 5-row one. */
+const TALLER = [
+  [250, 14],
+  [80, 14],
+] as const
 
 let failed = 0
 const bad = (why: string) => {
@@ -37,22 +52,37 @@ const bad = (why: string) => {
 
 if (syncManifest(false)) bad('plugin.json is out of step with SCENES: run `npm run sync`')
 
+// The clips on disk and the ones the manifest names, as scripts/make-sounds.ts lists them.
+const SOUNDS = join(import.meta.dirname, '..', 'sounds')
+const clips = listClips(SOUNDS)
+const named = new Set(SOUND_FILES)
+const unnamed = clips.filter(f => !named.has(f))
+const gone = SOUND_FILES.filter(f => !clips.includes(f))
+if (unnamed.length) bad(`hooks/sound-files.ts doesn't name ${unnamed.join(', ')}: run \`npm run sounds\``)
+if (gone.length) bad(`hooks/sound-files.ts names clips that aren't in sounds/: ${gone.join(', ')}: run \`npm run sounds\``)
+
+if (process.env.FLOW_MAX_MS) console.log(`time budget ${MAX_MS} ms a frame (FLOW_MAX_MS)\n`)
 console.log('scene      most pairs   ms at 250×5   ms at 22×60')
 for (const scene of scenesFrom(process.argv.slice(2))) {
   let most = 0
   let where = ''
-  for (const [columns, rows] of SIZES) {
-    for (const level of [1, 5, 10]) {
-      for (const night of nightsOf(scene)) {
-        for (const tint of TINTS) {
-          const f = build(scene, columns, rows, { level, night, tint }, 60)
-          for (let i = 0; i < 20; i++) {
-            f.step()
-            for (const hue of CHECK_HUES) {
-              const n = pairs(turned(scene, f.grid(), hue))
-              if (n > most) {
-                most = n
-                where = `${columns}×${rows} level ${level}${night ? ' night' : ''} ${tint}${hue === undefined ? '' : ` hue ${hue}`}`
+  const backdrops = backdropsOf(scene)
+  const taller = makeScene(scene, 1).taller === true
+  for (const [columns, rows] of taller ? [...SIZES, ...TALLER] : SIZES) {
+    for (const backdrop of backdrops) {
+      for (const level of [1, 5, 10]) {
+        for (const night of nightsOf(scene)) {
+          for (const look of LOOKS) {
+            for (const agents of [false, true]) {
+              const f = build(scene, columns, rows, { level, night, tint: look.tint, waiting: look.waiting, agents, backdrop }, 60)
+              for (let i = 0; i < 20; i++) {
+                f.step()
+                const grid = f.grid()
+                const n = Math.max(...CHECK_HUES.map(hue => pairs(turned(scene, grid, hue))))
+                if (n > most) {
+                  most = n
+                  where = `${columns}×${rows} level ${level}${night ? ' night' : ''} ${look.name}${agents ? ' with subagents' : ''}${backdrop ? `, ${backdrop.name}` : ''}`
+                }
               }
             }
           }
@@ -69,20 +99,28 @@ for (const scene of scenesFrom(process.argv.slice(2))) {
       }
     }
   }
-  const ms = TIMED.map(([columns, rows]) => {
-    const f = build(scene, columns, rows, { level: 10, night: false, tint: 'normal' }, 60)
-    const n = 200
-    const t0 = performance.now()
-    for (let i = 0; i < n; i++) {
-      f.step()
-      f.grid()
+  // (Working at 10, and waiting on the person, its sepia over every cell, over each backdrop: the slowest.)
+  const timed = taller ? [TALLER[0], TIMED[1]] : TIMED
+  const ms = timed.map(([columns, rows]) => {
+    let worst = 0
+    for (const backdrop of backdrops) {
+      for (const waiting of [false, true]) {
+        const f = build(scene, columns, rows, { level: 10, night: false, tint: 'normal', agents: true, waiting, backdrop }, 60)
+        const n = 200
+        const t0 = performance.now()
+        for (let i = 0; i < n; i++) {
+          f.step()
+          f.grid()
+        }
+        worst = Math.max(worst, (performance.now() - t0) / n)
+      }
     }
-    return (performance.now() - t0) / n
+    return worst
   })
-  console.log(`${scene.padEnd(10)} ${String(most).padStart(10)}   ${ms.map(m => m.toFixed(2).padStart(11)).join('   ')}`)
+  console.log(`${scene.padEnd(10)} ${String(most).padStart(10)}   ${ms.map(m => m.toFixed(2).padStart(11)).join('   ')}${taller ? `   (its band at ${TALLER[0].join('×')})` : ''}`)
   if (most > MAX_PAIRS) bad(`${scene}: ${most} colour pairs (at ${where}); Raster paints ${MAX_PAIRS}, quantize the gradients`)
   ms.forEach((m, i) => {
-    if (m > MAX_MS) bad(`${scene}: ${m.toFixed(2)} ms a frame at ${TIMED[i]!.join('×')} (budget ${MAX_MS} ms)`)
+    if (m > MAX_MS) bad(`${scene}: ${m.toFixed(2)} ms a frame at ${timed[i]!.join('×')} (budget ${MAX_MS} ms)`)
   })
 }
 console.log(failed ? `\n${failed} problem${failed > 1 ? 's' : ''}` : '\nall good')
