@@ -1,4 +1,4 @@
-// REVISION: flow-v186-upstream-merge
+// REVISION: flow-v193-upstream-merge
 //
 // The scenes, all driven by the same dials (strength 0..10, coverage boost,
 // the agents one by one, tint, night, waiting): SCENES, the one list of them (each scene file exports its
@@ -16,7 +16,7 @@
 import type { AgentDial } from './agents'
 import { Crew, failed, type AgentMark, type Mate } from './crew'
 import { AsciiFire, colorFor, glyphFor, params, SMOKE_TIPS } from './fire'
-import { Cells, freshSeed, Rng } from './cells'
+import { Cells, freshSeed, isTall, Rng } from './cells'
 export type { Cells }
 import { heatColor, smokeColor } from './fire-palette'
 import { BRAILLE, clamp, hash1, lowerBlock, mix, rampAt, smooth } from './pixels'
@@ -35,6 +35,7 @@ import { bubblesScene } from './bubbles'
 import { trainScene } from './train'
 import { earthriseScene } from './earthrise'
 import { doom3dScene, doomScene } from './doom'
+import { roadsterScene } from './roadster'
 
 
 /** What shows over a scene: smoke after a failure or a compaction, blue when the context is nearly full. */
@@ -232,7 +233,7 @@ class Ember implements Scene {
   }
 
   private get tall(): boolean {
-    return this.rows > 8
+    return isTall(this.columns, this.rows)
   }
 
   /** A companion fire's width and the gap beside it, in columns, for this layout. */
@@ -587,6 +588,7 @@ export const SCENES = [
   earthriseScene,
   doomScene,
   doom3dScene,
+  roadsterScene,
 ] as const
 export type SceneName = (typeof SCENES)[number]['name']
 export const STYLES: readonly SceneName[] = SCENES.map(d => d.name)

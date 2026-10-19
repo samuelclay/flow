@@ -1,4 +1,4 @@
-// REVISION: flow-v186-upstream-merge
+// REVISION: flow-v10-upstream-merge
 //
 // Flow for opencode (2.0), by Rob Macrae: the same ambient scenes as the
 // Claude Code mod and the pi extension, in opencode's terminal UI. A terminal
@@ -25,11 +25,11 @@
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { Activity, FRAME_MS } from '../hooks/activity'
+import { Activity } from '../hooks/activity'
 import { agentLine } from '../hooks/agents'
-import { staleSessions } from '../hooks/sessions'
-import { firstTips, type FlowConfig, type Host, parseFlowArgs, readConfig, replyTo, storedValue, tipChance, type Tips, versionNote } from '../hooks/settings'
-import { SceneDriver } from '../hooks/scene'
+import { staleSessions, storedOwn } from '../hooks/sessions'
+import { clockAt, firstTips, type Host, hostReplyText, NO_PLAYER, parseFlowArgs, readConfig, replyTo, tipChance, type Tips, untitled, versionNote } from '../hooks/settings'
+import { FRAME_MS, SceneDriver } from '../hooks/scene'
 import { Soundscape } from '../hooks/soundscape'
 import { type Scene, SCENES } from '../hooks/styles'
 import { Rng, type Cells } from '../hooks/cells'
@@ -69,6 +69,8 @@ type Kept = {
 /** The plugin's folder: its sounds/ are played from there. */
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
+const sameWords = (a: Uint32Array, b: Uint32Array): boolean => a.length === b.length && a.every((w, i) => w === b[i])
+
 function setup(ctx: OcContext): () => void {
   const player = afplayPlayer(ROOT)
   const HOST: Host = { panes: true, sound: player !== undefined, thumbnails: false }
@@ -84,7 +86,7 @@ function setup(ctx: OcContext): () => void {
     load: async () => readConfig({ ...ctx.options, ...kept.defaults }),
     save: changes =>
       keep(d => {
-        for (const [k, v] of Object.entries(changes) as [keyof FlowConfig, FlowConfig[keyof FlowConfig]][]) d.defaults[k] = storedValue(k, v)
+        Object.assign(d.defaults, storedOwn(changes))
       }),
   })
   /** A session's own settings, kept in the store under its id (as pi keeps them in the session itself). */
@@ -130,7 +132,7 @@ function setup(ctx: OcContext): () => void {
       })
     }
     // (The toast is titled flow already.)
-    return tip?.replace(/^flow: /, '')
+    return tip && untitled(tip)
   }
 
   /** The context limit of a session's model. */
@@ -162,10 +164,11 @@ function setup(ctx: OcContext): () => void {
   /**
    * The scene at a view's size, stepped by the frame loop: the view only draws it. opencode redraws far more
    * often than a frame (each key, each streamed word), so a frame is made once a step and drawn as often as
-   * asked; made again on every redraw it would cost a frame's work each time, and the scenes that flicker at
-   * random as they draw (engine, the rockets) would flicker faster.
+   * asked; made again on every redraw it would cost a frame's work each time.
    */
   let made: { scene: Scene; cells: Cells } | undefined
+  /** The frame last sent to a view, and which: one just like it (a calm balloon's often is) asks for no redraw. */
+  let sent: { view: SceneView; words: Uint32Array } | undefined
   const frameAt = (columns: number, rows: number) => {
     const f = driver.scene
     if (!driver.isShown()) return undefined
@@ -229,7 +232,7 @@ function setup(ctx: OcContext): () => void {
           void keep(d => {
             d.warned = version
           })
-          ctx.ui.toast.show({ title: 'flow', message: note.replace(/^flow: /, ''), variant: 'warning', duration: 12_000 })
+          ctx.ui.toast.show({ title: 'flow', message: untitled(note), variant: 'warning', duration: 12_000 })
         }
       }, TIP_AFTER_MS)
     }
@@ -259,8 +262,7 @@ function setup(ctx: OcContext): () => void {
     sinceClock += elapsed
     if (sinceClock >= CLOCK_EVERY_MS) {
       sinceClock = 0
-      const d = new Date()
-      driver.clock = { hour: d.getHours(), minute: d.getMinutes() }
+      driver.clock = clockAt(Date.now())
     }
     sinceDefaults += elapsed
     if (sinceDefaults >= DEFAULTS_EVERY_MS && opened) {
@@ -283,8 +285,12 @@ function setup(ctx: OcContext): () => void {
       f.ensure(live.width, live.height)
       f.step()
       made = undefined
-      live.requestRender()
-    }
+      const words = frameAt(live.width, live.height)?.words
+      if (words && (sent?.view !== live || !sameWords(words, sent.words))) {
+        sent = { view: live, words: words.slice() }
+        live.requestRender()
+      }
+    } else sent = undefined
     sound.step(elapsed, {
       heard: live !== undefined,
       shown: live ? f : undefined,
@@ -328,7 +334,7 @@ function setup(ctx: OcContext): () => void {
       cmd = { kind: 'style', name }
     }
     if (cmd.kind === 'sound' && !player) {
-      ctx.ui.toast.show({ title: 'flow', message: 'the soundscapes play through afplay, which only macOS has', variant: 'warning' })
+      ctx.ui.toast.show({ title: 'flow', message: NO_PLAYER, variant: 'warning' })
       return
     }
     const reply = await replyTo(cmd, {
@@ -344,16 +350,13 @@ function setup(ctx: OcContext): () => void {
       level: () => driver.level(),
       tint: () => driver.tint(),
       shown: () => driver.shown(),
-      save: async () => {
-        const { text, saved } = await settings.save(entries)
-        return { text, level: saved ? 'info' : 'warning' }
-      },
+      save: () => settings.save(entries),
       reset: async () => settings.reset(entries),
       change: changes => settings.change(changes, entries),
     })
     // A one-time tip goes under the reply, as in Claude Code.
     const tip = takeTip()
-    const text = (cmd.kind === 'error' ? reply.text.replace(/^! /, '') : reply.text) + (tip ? `\n\n${tip}` : '')
+    const text = hostReplyText(cmd, reply, tip)
     // (The help is long: a dialog to read at leisure. The rest is a line or two, a toast.)
     if (cmd.kind === 'help') return void (await ctx.ui.dialog.alert({ title: 'flow', message: text }))
     ctx.ui.toast.show({ title: 'flow', message: text, variant: reply.level === 'warning' ? 'warning' : 'info', duration: tip ? 12_000 : undefined })

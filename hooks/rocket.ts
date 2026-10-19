@@ -1,4 +1,4 @@
-// REVISION: flow-v186-upstream-merge
+// REVISION: flow-v193-upstream-merge
 //
 // Two launch sites in the sky world (sky.ts): a Falcon 9 and a Starship, each
 // beside a lattice launch tower (Starship's with two catch arms). The level is the
@@ -606,7 +606,7 @@ abstract class LaunchSite extends SkyWorld {
 
   /** Step the acted-out level toward the asked one (`strength`), then fly it. */
   override step(): void {
-    const asked = Math.max(0, Math.min(10, Math.round(this.strength)))
+    const asked = clamp(Math.round(this.strength), 0, 10)
     this.sinceStage++
     if (this.host) {
       // A mini rocket is asked its host's level as acted out (late): it acts it out as it is.
@@ -775,6 +775,8 @@ abstract class LaunchSite extends SkyWorld {
   private twinH = 0
   private braking = false
   private rng: Rng
+  /** Salts the plume's flicker (drawn from a hash, so drawing never moves the rng). */
+  private readonly flicker: number
   /** The layer it's flying in (world rows), eased; -1 until the first frame. */
   private layer = -1
   /** Tiles folded away so far: offsets each tile's clouds sideways. */
@@ -837,6 +839,7 @@ abstract class LaunchSite extends SkyWorld {
   constructor(seed = freshSeed()) {
     super(seed)
     this.rng = new Rng(seed * 2654435761)
+    this.flicker = seed | 0
   }
 
   override ensure(columns: number, rows: number): void {
@@ -1225,7 +1228,7 @@ abstract class LaunchSite extends SkyWorld {
     const rest = s.mount / 2
     const catchAlt = (s.armCatch - s.grip) / 2
     const home = this.target <= 0
-    const lv = Math.max(0, Math.min(10, Math.round(this.strength)))
+    const lv = clamp(Math.round(this.strength), 0, 10)
     const want = LAYER[lv]!
     if (this.fresh) {
       this.fresh = false
@@ -1945,7 +1948,7 @@ abstract class LaunchSite extends SkyWorld {
     const p = this.part
     // (No plume from the Ship until it's all but upright: the plume falls straight down, and a tilted Ship over it looks wrong.)
     if (this.thr <= 0 || p === 'dragon' || p === 'capsule' || this.flop > 0.06) return 0
-    let len = this.spec.plume * this.thr * (0.85 + 0.3 * this.rng.f()) * (this.part === 'upper' ? 0.7 : 1)
+    let len = this.spec.plume * this.thr * (0.85 + 0.3 * hash(this.t, this.flicker, 41)) * (this.part === 'upper' ? 0.7 : 1)
     if (this.tint === 'smoke' && hash(this.t >> 1, 3, 43) < 0.35) len *= 0.25
     return len
   }

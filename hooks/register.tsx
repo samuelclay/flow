@@ -1,4 +1,4 @@
-// REVISION: flow-v186-upstream-merge
+// REVISION: flow-v193-upstream-merge
 //
 // Flow for Claude Code, by Rob Macrae: ambient scenes (a fire, the surf, a ski run,
 // rockets, a hot-air balloon and more) drawn as one terminal `Raster` in the
@@ -61,6 +61,7 @@ import type { AgentMark } from './crew'
 import { FRAME_MS, SceneDriver } from './scene'
 import {
   CLAUDE_CODE,
+  clockAt,
   firstTips,
   ownHint,
   parseFlowArgs,
@@ -68,7 +69,6 @@ import {
   replyTo,
   resetText,
   savedText,
-  storedValue,
   type FlowCommand,
   type FlowConfig,
   type FlowLayout,
@@ -115,7 +115,7 @@ import {
 } from './picker'
 
 
-const FLOW_REVISION = 'flow-v186-upstream-merge'
+const FLOW_REVISION = 'flow-v193-upstream-merge'
 const PLUGIN = 'flow-scenes'
 import { drawSession, readPick, type SessionPick } from './pick'
 import type { ScenePick } from '../types'
@@ -556,9 +556,7 @@ export async function planSave($: EngineInterface, ctx: SceneCtx): Promise<SaveP
   await refreshDefaults($, ctx)
   const s = ctx.session
   const changes = differences(ctx.driver.cfg, s.defaults)
-  const rows = (Object.entries(changes) as [keyof FlowConfig, FlowConfig[keyof FlowConfig]][]).map(
-    ([field, value]) => [field, storedValue(field, value)] as [keyof FlowConfig, string | number],
-  )
+  const rows = Object.entries(storedOwn(changes)) as [keyof FlowConfig, string | number][]
   return { before: { ...s.defaults }, changes, rows }
 }
 
@@ -919,8 +917,7 @@ export const register: Register = (on, options) => {
     lastCells = ''
   }
   const setClock = (ms: number) => {
-    const d = new Date(ms)
-    driver.clock = desktopDriver.clock = { hour: d.getHours(), minute: d.getMinutes() }
+    driver.clock = desktopDriver.clock = clockAt(ms)
   }
   /** The scene no longer draws in the spine (its pane closed, or showing the band's note). */
   const leftSpine = () => {
@@ -1605,7 +1602,7 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column">
           {hint}
           {SCENES.map((d, i) => (
-            <Box flexDirection="row" gap={1}>
+            <Box key={`row:${d.name}`} flexDirection="row" gap={1}>
               {button(d.name, i)}
               <Text dimColor wrap="truncate-end">
                 {d.blurb}
@@ -1633,7 +1630,7 @@ export const register: Register = (on, options) => {
     const grid: RenderElement[] = []
     for (let at = 0; at < SCENES.length; at += layout.across) {
       grid.push(
-        <Box flexDirection="row" columnGap={1}>
+        <Box key={`row:${at}`} flexDirection="row" columnGap={1}>
           {SCENES.slice(at, at + layout.across).map((d, k) => tile(d.name, at + k))}
         </Box>,
       )

@@ -1,14 +1,14 @@
-// REVISION: flow-v186-upstream-merge
+// REVISION: flow-v193-upstream-merge
 //
-// What every harness adapter (Claude Code's register.tsx, pi's pi/index.ts)
-// does the same way: one scene instance per
-// style (so a switch resumes where that scene left off), the level the
-// settings and the activity call for, whether anything shows at all, and
-// pointing the current scene at those dials and the time of day. Two drivers
-// can share one cfg (each with its own scenes): the scene follows the shared
-// style. `random` shows the scene the adapter picked as the session opened
-// (`pick`), and the colour setting turns every frame to a hue (`cells()`);
-// adapters draw from the driver, not the scene. Pure: no engine imports.
+// What every harness adapter (Claude Code's register.tsx, opencode's
+// opencode/tui.ts, pi's pi/index.ts) does the same way: one scene instance per style (so a switch resumes where
+// that scene left off), the level the settings and the activity call for, whether
+// anything shows at all, and pointing the current scene at those dials, the
+// time of day and whether Claude waits on the person. Two drivers can share
+// one cfg (each with its own scenes): the scene follows the shared style.
+// `random` shows the scene the adapter picked as the session opened (`pick`),
+// and the colour setting turns every frame to a hue (`cells()`); adapters draw
+// from the driver, not the scene. Pure: no engine imports.
 
 import { type Activity, FRAME_MS } from './activity'
 import { Cells } from './cells'
